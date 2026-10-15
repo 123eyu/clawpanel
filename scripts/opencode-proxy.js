@@ -1,4 +1,5 @@
 /** OpenCode Web 内嵌代理的纯函数。 */
+import { gunzipSync, inflateSync, brotliDecompressSync } from 'node:zlib'
 
 export const OPENCODE_EMBED_ROOT = '/__opencode'
 export const OPENCODE_EMBED_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,128}$/
@@ -58,6 +59,16 @@ export function shouldRewriteOpenCodeResponse(contentType) {
   return type.includes('text/html') || type.includes('text/css') || type.includes('manifest')
 }
 
+/** 改写前解码文本；限制解压后的大小，避免压缩响应被直接当作 UTF-8。 */
+export function decodeOpenCodeProxyBody(body, encoding) {
+  const normalized = String(encoding || 'identity').toLowerCase().trim()
+  const decoders = { gzip: gunzipSync, deflate: inflateSync, br: brotliDecompressSync }
+  if (!normalized || normalized === 'identity') return body
+  const decode = decoders[normalized]
+  if (!decode) throw new Error('OpenCode 响应使用不支持的内容编码')
+  return decode(body, { maxOutputLength: 32 * 1024 * 1024 })
+}
+
 export function openCodeUpstreamHeaders(headers, port, { password = '', websocket = false } = {}) {
   const result = {}
   const blocked = new Set([
@@ -75,6 +86,6 @@ export function openCodeUpstreamHeaders(headers, port, { password = '', websocke
   if (websocket) {
     result.connection = 'Upgrade'
     result.upgrade = headers?.upgrade || 'websocket'
-  }
+  } else result['accept-encoding'] = 'identity'
   return result
 }

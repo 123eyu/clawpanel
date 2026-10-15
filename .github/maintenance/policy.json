@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "repository": "qingchencloud/clawpanel",
+  "autoRelease": false,
+  "limits": { "pages": 6, "details": 30, "requestMs": 20000, "responseBytes": 8388608, "patchFiles": 12, "patchLines": 600, "patchBytes": 262144, "feedbackInlineBytes": 8192, "feedbackChunkBytes": 16384, "feedbackItemBytes": 262144, "feedbackTotalBytes": 8388608, "feedbackChunks": 256 },
+  "sources": [
+    {
+      "id": "openclaw", "engine": "openclaw", "repository": "openclaw/openclaw", "package": "openclaw", "channel": "latest", "tagPrefix": "v",
+      "baseline": { "path": "openclaw-version-policy.json", "keys": ["default", "official", "recommended"] },
+      "mirrors": [{ "path": "src/lib/feature-catalog.js", "pattern": "official: '([^']+)'" }, { "path": "Dockerfile", "pattern": "ARG OPENCLAW_VERSION=([^\\s]+)" }],
+      "allowedPaths": ["openclaw-version-policy.json", "src/lib/feature-catalog.js", "Dockerfile", "scripts/linux-deploy.sh", "src/lib/openclaw-gateway-compat.js", "src/lib/ws-client.js", "scripts/dev-api.js", "src-tauri/src/commands/config.rs"]
+    },
+    {
+      "id": "openclaw-zh", "engine": "openclaw", "repository": "1186258278/OpenClawChineseTranslation", "package": "@qingchencloud/openclaw-zh", "channel": "latest", "tagPrefix": "v",
+      "baseline": { "path": "openclaw-version-policy.json", "keys": ["default", "chinese", "recommended"] },
+      "mirrors": [{ "path": "src/lib/feature-catalog.js", "pattern": "chinese: '([^']+)'" }],
+      "allowedPaths": ["openclaw-version-policy.json", "src/lib/feature-catalog.js", "scripts/dev-api.js", "src-tauri/src/commands/config.rs"]
+    },
+    {
+      "id": "hermes", "engine": "hermes", "repository": "NousResearch/hermes-agent", "channel": "stable", "tagPrefix": "v",
+      "baseline": { "path": "scripts/dev-api.js", "pattern": "HERMES_STABLE_VERSION = '([^']+)'" },
+      "tagBaseline": { "path": "scripts/dev-api.js", "pattern": "HERMES_STABLE_TAG = '([^']+)'" },
+      "mirrors": [{ "path": "src-tauri/src/commands/hermes.rs", "pattern": "HERMES_STABLE_VERSION: &str = \"([^\"]+)\"" }],
+      "allowedPaths": ["scripts/dev-api.js", "src-tauri/src/commands/hermes.rs", "src/engines/hermes/", "src/lib/feature-catalog.js"]
+    },
+    {
+      "id": "deepseek-harness", "engine": "deepseek-harness", "repository": "deepseek-ai/deepseek-harness", "package": "@deepseek-ai/dsh", "channel": "latest", "tagPrefix": "dsh-v", "existingPrerelease": true,
+      "baseline": { "path": "scripts/deepseek-harness.js", "pattern": "DSH_STABLE_VERSION = '([^']+)'" },
+      "mirrors": [{ "path": "src-tauri/src/commands/deepseek_harness.rs", "pattern": "DSH_STABLE_VERSION: &str = \"([^\"]+)\"" }],
+      "allowedPaths": ["scripts/deepseek-harness.js", "scripts/deepseek-harness-proxy.js", "scripts/deepseek-harness-auth.js", "scripts/deepseek-harness-web.yml", "scripts/dev-api.js", "src-tauri/src/commands/deepseek_harness.rs", "src/engines/deepseek-harness/"]
+    },
+    {
+      "id": "deepseek-harness-preview", "engine": "deepseek-harness", "repository": "deepseek-ai/deepseek-harness", "package": "@deepseek-ai/dsh", "channel": "alpha", "tagPrefix": "dsh-v", "preview": true,
+      "baseline": { "path": "scripts/deepseek-harness.js", "pattern": "DSH_PREVIEW_VERSION = '([^']+)'" },
+      "mirrors": [{ "path": "src-tauri/src/commands/deepseek_harness.rs", "pattern": "DSH_PREVIEW_VERSION: &str = \"([^\"]+)\"" }],
+      "allowedPaths": []
+    },
+    {
+      "id": "opencode", "engine": "opencode", "repository": "anomalyco/opencode", "package": "opencode-ai", "channel": "latest", "tagPrefix": "v",
+      "baseline": { "path": "scripts/opencode.js", "pattern": "OPENCODE_PACKAGE_VERSION = '([^']+)'" },
+      "mirrors": [{ "path": "src-tauri/src/commands/opencode.rs", "pattern": "OPENCODE_PACKAGE_VERSION: &str = \"([^\"]+)\"" }],
+      "allowedPaths": ["scripts/opencode.js", "scripts/opencode-proxy.js", "scripts/dev-api.js", "src-tauri/src/commands/opencode.rs", "src/engines/opencode/"]
+    },
+    {
+      "id": "pi", "engine": "pi", "repository": "earendil-works/pi", "package": "@earendil-works/pi-coding-agent", "channel": "latest", "tagPrefix": "v",
+      "baseline": { "path": "scripts/pi-models.js", "pattern": "PI_PACKAGE_VERSION = '([^']+)'" },
+      "mirrors": [],
+      "allowedPaths": ["scripts/pi-models.js", "scripts/pi-runtime.js", "scripts/pi-rpc.js", "src/engines/pi/"]
+    },
+    {
+      "id": "weixin", "engine": "openclaw", "package": "@tencent-weixin/openclaw-weixin", "channel": "latest", "plugin": true,
+      "baseline": { "path": "src/lib/weixin-compat-policy.json", "keys": ["reviewedVersion"] },
+      "mirrors": [],
+      "allowedPaths": ["src/lib/weixin-compat-policy.json", "scripts/weixin-compat.js"]
+    }
+  ]
+}

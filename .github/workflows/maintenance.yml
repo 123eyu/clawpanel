@@ -1,0 +1,451 @@
+name: Daily Maintenance
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/maintenance.yml'
+      - '.github/maintenance/**'
+      - 'scripts/maintenance*'
+      - 'scripts/maintenance/**'
+      - 'scripts/test-maintenance.mjs'
+      - 'scripts/fixtures/maintenance/**'
+      - 'package*.json'
+  schedule:
+    # 北京时间每天 09:17，避开整点。
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+    inputs:
+      runtime_selftest:
+        description: '运行 OpenClaw/Hermes 基线容器验收（独立于 AI 候选）'
+        required: false
+        type: boolean
+        default: false
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/maintenance.yml'
+      - '.github/maintenance/**'
+      - 'scripts/maintenance*'
+      - 'scripts/maintenance/**'
+      - 'scripts/test-maintenance.mjs'
+      - 'scripts/fixtures/maintenance/**'
+      - 'package*.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintenance-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'daily' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  controller-e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.16.0
+      - run: npm ci
+      - name: 控制器黑盒 E2E（只访问本地模拟数据源）
+        run: node scripts/test-maintenance.mjs --output .tmp/maintenance-controller-e2e
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: maintenance-controller-${{ matrix.os }}
+          include-hidden-files: true
+          if-no-files-found: error
+          path: |
+            .tmp/maintenance-controller-e2e/
+            !.tmp/maintenance-controller-e2e/baseline/**
+            !.tmp/maintenance-controller-e2e/**/repo/**
+            !.tmp/maintenance-controller-e2e/**/home/**
+          retention-days: 30
+
+  # 手工首轮验收真实生产入口，不依赖 AI Key，不授予写入凭据。
+  runtime-selftest:
+    needs: controller-e2e
+    if: github.event_name == 'workflow_dispatch' && inputs.runtime_selftest && github.repository == 'qingchencloud/clawpanel' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [openclaw, hermes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: tooling
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: candidate
+          persist-credentials: false
+      - name: 构建可信验收容器
+        run: docker build --file tooling/.github/maintenance/Runtime.Dockerfile --tag clawpanel-maintenance-verifier tooling
+      - name: 非特权容器真实基线验收
+        env:
+          ENGINE: ${{ matrix.engine }}
+        run: |
+          mkdir -p evidence
+          docker run --rm --user "$(id -u):$(id -g)" --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=512 --memory=4g \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/tooling,dst=/tooling,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/candidate,dst=/candidate" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/evidence,dst=/evidence" \
+            --env HOME=/tmp/maintenance-bootstrap --env CI=1 --env MAINTENANCE_ISOLATED_RUNTIME=1 --env "ENGINE=$ENGINE" \
+            clawpanel-maintenance-verifier bash -euo pipefail -c '
+              test ! -w /tooling/scripts/maintenance-runtime-smoke.mjs
+              test ! -w /tooling/.github/maintenance/policy.json
+              mkdir -p "$HOME"
+              npm ci
+              npm run build
+              node /tooling/scripts/maintenance-runtime-smoke.mjs --root /candidate --engine "$ENGINE" --output /evidence/runtime
+            '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: maintenance-baseline-${{ matrix.engine }}
+          path: |
+            evidence/runtime/*.json
+            evidence/runtime/*.md
+            evidence/runtime/logs/
+          if-no-files-found: error
+          retention-days: 30
+
+  scan:
+    if: github.repository == 'qingchencloud/clawpanel' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      complete: ${{ steps.meta.outputs.complete }}
+      selected: ${{ steps.meta.outputs.selected }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # 候选身份依赖实际源文件最近提交；浅克隆会把边界误当作修改。
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.16.0
+      - name: 每日巡检和反馈整理（只读）
+        id: collect
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/maintenance.mjs scan --output .tmp/maintenance
+      - name: 读取受限调度信息
+        id: meta
+        if: always()
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const r=JSON.parse(fs.readFileSync(".tmp/maintenance/report.json","utf8"));
+            const id=r.complete && /^[a-z-]+$/.test(r.selected?.id || "") ? r.selected.id : "";
+            fs.appendFileSync(process.env.GITHUB_OUTPUT,`complete=${r.complete === true}\nselected=${id}\n`);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,fs.readFileSync(".tmp/maintenance/report.md","utf8"));
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: maintenance-scan
+          path: .tmp/maintenance/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+      - name: 数据缺失必须显示失败
+        if: steps.collect.outcome != 'success'
+        run: exit 1
+
+  adapt:
+    needs: [scan, controller-e2e]
+    if: needs.scan.outputs.complete == 'true' && needs.scan.outputs.selected != '' && vars.MAINTENANCE_ADAPT_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      status: ${{ steps.result.outputs.status }}
+      risk: ${{ steps.result.outputs.risk }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.16.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: maintenance-scan
+          path: candidate/.tmp/maintenance
+      - name: 准备已有依赖
+        working-directory: candidate
+        run: |
+          mkdir -p .tmp/adaptation
+          npm ci
+      - name: 检查 AI 运行凭据是否已配置
+        env:
+          API_KEY: ${{ secrets.MAINTENANCE_OPENAI_API_KEY }}
+        run: test -n "$API_KEY" || { echo '缺少 MAINTENANCE_OPENAI_API_KEY'; exit 1; }
+      # AI 没有仓库写入凭据，只有工作目录权限；最多运行一轮。
+      - name: 隔离生成候选适配
+        uses: openai/codex-action@a8d8be6ee028bea4525bc722d16f36687b408c81
+        with:
+          openai-api-key: ${{ secrets.MAINTENANCE_OPENAI_API_KEY }}
+          working-directory: ${{ github.workspace }}/candidate
+          permission-profile: ':workspace'
+          safety-strategy: drop-sudo
+          codex-args: '["--ephemeral"]'
+          codex-version: '0.162.1'
+          prompt-file: ${{ github.workspace }}/candidate/.tmp/maintenance/prompt.md
+          output-file: ${{ github.workspace }}/candidate/.tmp/adaptation/result.json
+          output-schema: |
+            {"type":"object","additionalProperties":false,"required":["status","risk","summary","reason","tests"],"properties":{"status":{"type":"string","enum":["candidate","needs_confirmation","no_change"]},"risk":{"type":"string","enum":["low","medium","high"]},"summary":{"type":"string"},"reason":{"type":"string"},"tests":{"type":"array","items":{"type":"string"}}}}
+      - name: 导出候选补丁（不提交）
+        if: always()
+        working-directory: candidate
+        run: |
+          mkdir -p .tmp/adaptation
+          rm -f adaptation-result.json
+          git -c core.hooksPath= add --intent-to-add -- .
+          git -c core.hooksPath= diff --no-ext-diff --no-textconv --binary HEAD > .tmp/adaptation/candidate.patch
+      - name: 读取候选分级（模型自述不作为测试证明）
+        id: result
+        if: always()
+        working-directory: candidate
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const r=JSON.parse(fs.readFileSync(".tmp/adaptation/result.json","utf8"));
+            if(!["candidate","needs_confirmation","no_change"].includes(r.status)||!["low","medium","high"].includes(r.risk))process.exit(1);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT,`status=${r.status}\nrisk=${r.risk}\n`);
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: maintenance-candidate
+          path: candidate/.tmp/adaptation/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+
+  verify:
+    needs: [scan, adapt]
+    if: needs.adapt.result == 'success' && needs.adapt.outputs.status == 'candidate' && needs.adapt.outputs.risk != 'high'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # 可信门禁和候选源码分开签出；只从可信副本执行补丁校验/运行验收器。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: tooling
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.16.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: maintenance-scan
+          path: evidence/scan
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: maintenance-candidate
+          path: evidence/adaptation
+      - name: 先校验后应用补丁
+        run: |
+          node tooling/scripts/maintenance.mjs guard --root candidate --report evidence/scan/report.json --patch evidence/adaptation/candidate.patch --result evidence/adaptation/result.json --output evidence/guard
+          git -C candidate apply "$GITHUB_WORKSPACE/evidence/adaptation/candidate.patch"
+          node tooling/scripts/maintenance.mjs pins --root candidate --report evidence/scan/report.json --output evidence/pins
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux 桌面依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev libayatana-appindicator3-dev
+      - name: 既有回归和构建
+        working-directory: candidate
+        run: |
+          npm ci
+          node --test tests/*.test.js 2>&1 | tee ../evidence/node-tests.log
+          node scripts/test-pi-runtime.mjs 2>&1 | tee ../evidence/pi-rpc.log
+          npm run build 2>&1 | tee ../evidence/build.log
+          cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check
+          cargo check --locked --manifest-path src-tauri/Cargo.toml
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path src-tauri/Cargo.toml 2>&1 | tee ../evidence/rust-tests.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: maintenance-verification-${{ matrix.os }}
+          path: evidence/
+          retention-days: 30
+
+  runtime-verify:
+    needs: [scan, adapt]
+    if: needs.adapt.result == 'success' && needs.adapt.outputs.status == 'candidate' && needs.adapt.outputs.risk != 'high'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: tooling
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.16.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: maintenance-scan
+          path: evidence/scan
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: maintenance-candidate
+          path: evidence/adaptation
+      - name: 全新 runner 校验候选和构建可信验收环境
+        run: |
+          node tooling/scripts/maintenance.mjs guard --root candidate --report evidence/scan/report.json --patch evidence/adaptation/candidate.patch --result evidence/adaptation/result.json --output evidence/runtime-guard
+          git -C candidate apply "$GITHUB_WORKSPACE/evidence/adaptation/candidate.patch"
+          node tooling/scripts/maintenance.mjs pins --root candidate --report evidence/scan/report.json --output evidence/pins
+          docker build --file tooling/.github/maintenance/Runtime.Dockerfile --tag clawpanel-maintenance-verifier tooling
+      - name: OpenClaw 候选实际发行 Dockerfile 验证
+        if: needs.scan.outputs.selected == 'openclaw'
+        run: |
+          docker build --tag clawpanel-maintenance-candidate candidate
+          node tooling/scripts/smoke-docker-runtime.mjs clawpanel-maintenance-candidate candidate/openclaw-version-policy.json 2>&1 | tee evidence/docker-runtime.log
+      - name: 只读验收器容器中的真实运行时验收
+        env:
+          ENGINE: ${{ needs.scan.outputs.selected }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=512 --memory=4g \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/tooling,dst=/tooling,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/candidate,dst=/candidate" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/evidence,dst=/evidence" \
+            --env HOME=/tmp/maintenance-bootstrap --env CI=1 --env MAINTENANCE_ISOLATED_RUNTIME=1 --env "ENGINE=$ENGINE" \
+            clawpanel-maintenance-verifier bash -euo pipefail -c '
+              test ! -w /tooling/scripts/maintenance-runtime-smoke.mjs
+              test ! -w /tooling/.github/maintenance/policy.json
+              mkdir -p "$HOME"
+              npm ci
+              npm run build
+              node /tooling/scripts/maintenance-runtime-smoke.mjs --root /candidate --engine "$ENGINE" --output /evidence/runtime
+            '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: maintenance-runtime-verification
+          path: |
+            evidence/scan/
+            evidence/adaptation/
+            evidence/runtime-guard/
+            evidence/pins/
+            evidence/docker-runtime.log
+            evidence/runtime/*.json
+            evidence/runtime/*.md
+            evidence/runtime/logs/
+          retention-days: 30
+
+  draft:
+    needs: [scan, adapt, verify, runtime-verify]
+    if: needs.verify.result == 'success' && needs.runtime-verify.result == 'success' && vars.MAINTENANCE_PR_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: tooling
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: candidate
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.16.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: maintenance-scan
+          path: evidence/scan
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: maintenance-candidate
+          path: evidence/adaptation
+      # 此 job 不安装依赖/不运行候选代码。App 仅写当前仓库；不用长期个人 PAT。
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        id: app
+        with:
+          app-id: ${{ vars.MAINTENANCE_APP_ID }}
+          private-key: ${{ secrets.MAINTENANCE_APP_PRIVATE_KEY }}
+          repositories: clawpanel
+          permission-contents: write
+          permission-pull-requests: write
+      - name: 仅创建/复用草稿候选 PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: node tooling/scripts/maintenance.mjs propose --root candidate --report evidence/scan/report.json --patch evidence/adaptation/candidate.patch --result evidence/adaptation/result.json --apply
+
+  notify:
+    needs: [scan, controller-e2e, adapt, verify, runtime-verify, draft]
+    if: always() && github.repository == 'qingchencloud/clawpanel' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.16.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: maintenance-scan
+          path: .tmp/maintenance
+      - name: 记录可信步骤失败状态
+        env:
+          ADAPT_RESULT: ${{ needs.adapt.result }}
+          CONTROLLER_RESULT: ${{ needs.controller-e2e.result }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          RUNTIME_RESULT: ${{ needs.runtime-verify.result }}
+          DRAFT_RESULT: ${{ needs.draft.result }}
+          MODEL_STATUS: ${{ needs.adapt.outputs.status }}
+          MODEL_RISK: ${{ needs.adapt.outputs.risk }}
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs"; import {createHash} from "node:crypto";
+            const file=".tmp/maintenance/report.json",r=JSON.parse(fs.readFileSync(file,"utf8"));
+            const failures=["CONTROLLER_RESULT","ADAPT_RESULT","VERIFY_RESULT","RUNTIME_RESULT","DRAFT_RESULT"].filter(key=>["failure","cancelled"].includes(process.env[key]));
+            if(failures.length){r.needsConfirmation=true;r.errors.push("维护步骤失败，需人工复查："+failures.join(","));r.fingerprint=createHash("sha256").update(r.fingerprint+failures.join(",")).digest("hex");}
+            if(process.env.MODEL_STATUS==="needs_confirmation"||process.env.MODEL_RISK==="high"){r.needsConfirmation=true;r.errors.push("候选适配发现高风险或需确认项，已停止。");r.fingerprint=createHash("sha256").update(r.fingerprint+"model-confirmation").digest("hex");}
+            if((failures.length||process.env.MODEL_STATUS==="needs_confirmation"||process.env.MODEL_RISK==="high")&&/^[a-f0-9]{64}$/.test(r.candidateKey||""))r.blockedCandidateKey=r.candidateKey;
+            fs.writeFileSync(file,JSON.stringify(r,null,2));
+          '
+      - name: 高风险/异常通知（相同指纹不重复写入）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAINTENANCE_NOTIFY_LOGIN: ${{ vars.MAINTENANCE_NOTIFY_LOGIN }}
+        run: node scripts/maintenance.mjs notify --report .tmp/maintenance/report.json --apply

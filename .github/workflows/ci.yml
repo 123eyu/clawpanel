@@ -2,6 +2,10 @@
 # 在推送到 main 分支或提交 PR 到 main 分支时自动运行
 name: CI
 
+# 候选安装与测试仅需读取源码，不继承仓库默认写权限。
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -37,6 +41,8 @@ jobs:
       # 签出代码
       - name: 签出代码
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # 安装 OpenClaw 当前最低要求的 Node.js 版本
       - name: 安装 Node.js

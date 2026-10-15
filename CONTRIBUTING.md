@@ -581,6 +581,10 @@ git push origin main
 
 ---
 
+## 每日维护与自动适配
+
+日常维护由本地 Codex 定时任务在用户授权范围内执行，低风险改动经同一提交 CI 和真实验收通过后才发 tag，高风险需确认，无改动不空发。独立 `Daily Maintenance` 工作流提供巡检、反馈整理和验收；其可选 AI 候选/草稿 PR 默认关闭，控制器不自动合并或发版。启用配置、可重复命令及验收边界见 [每日维护说明](docs/maintenance.md)。
+
 ## 问题反馈
 
 如果发现 Bug 或有功能建议，欢迎通过 [GitHub Issues](https://github.com/qingchencloud/clawpanel/issues) 提交。

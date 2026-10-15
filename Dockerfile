@@ -50,6 +50,9 @@ RUN apk add --no-cache \
     git \
     curl \
     bash \
+    iproute2 \
+    procps \
+    lsof \
     tzdata
 
 # 设置时区

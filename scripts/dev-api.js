@@ -70,6 +70,7 @@ import {
 import {
   openCodeEmbedPrefix,
   openCodeUpstreamHeaders,
+  decodeOpenCodeProxyBody,
   parseOpenCodeEmbedUrl,
   rewriteOpenCodeProxyText,
   shouldRewriteOpenCodeResponse,
@@ -12812,6 +12813,8 @@ function copyOpenCodeProxyHeaders(upstreamHeaders, res, { rewrite, prefix }) {
     else res.setHeader(rawName, rawValue)
   }
   if (!rewrite && upstreamHeaders['content-length'] !== undefined) res.setHeader('Content-Length', upstreamHeaders['content-length'])
+  // JSON/二进制等不改写的响应按字节透传，必须保留对应编码头。
+  if (!rewrite && upstreamHeaders['content-encoding']) res.setHeader('Content-Encoding', upstreamHeaders['content-encoding'])
   setOpenCodeEmbedResponseHeaders(res)
 }
 
@@ -12848,7 +12851,14 @@ function proxyOpenCodeEmbedHttp(req, res, route, session) {
       })
       upstreamRes.once('end', () => {
         if (completed || res.writableEnded) return finish()
-        const body = Buffer.from(rewriteOpenCodeProxyText(Buffer.concat(chunks).toString('utf8'), route.prefix, { contentType }), 'utf8')
+        let body
+        try {
+          const decoded = decodeOpenCodeProxyBody(Buffer.concat(chunks), upstreamRes.headers['content-encoding'])
+          body = Buffer.from(rewriteOpenCodeProxyText(decoded.toString('utf8'), route.prefix, { contentType }), 'utf8')
+        } catch {
+          writeOpenCodeProxyError(res, 502, 'OpenCode 内嵌响应解码失败')
+          return finish()
+        }
         res.statusCode = upstreamRes.statusCode || 502
         copyOpenCodeProxyHeaders(upstreamRes.headers, res, { rewrite, prefix: route.prefix })
         res.setHeader('Content-Length', String(body.length))
@@ -17131,21 +17141,13 @@ const handlers = {
     let modelName = '', baseUrl = '', provider = '', apiKey = ''
     try {
       const content = fs.readFileSync(configPath, 'utf8')
-      let inModel = false
-      for (const line of content.split('\n')) {
-        const t = line.trim()
-        if (t.startsWith('model:')) {
-          inModel = true
-          const v = t.slice(6).trim().replace(/^["']|["']$/g, '')
-          if (v && !v.includes(':')) modelName = v
-          continue
-        }
-        if (inModel) {
-          if (t.startsWith('default:')) modelName = t.slice(8).trim().replace(/^["']|["']$/g, '')
-          else if (t.startsWith('base_url:')) baseUrl = t.slice(9).trim().replace(/^["']|["']$/g, '')
-          else if (t.startsWith('provider:')) provider = t.slice(9).trim().replace(/^["']|["']$/g, '')
-          else if (t && !t.startsWith('#') && !t.startsWith('-') && !/^\s/.test(line)) inModel = false
-        }
+      // 与桌面端一致只解析顶层 model，避免后面的 stt/auxiliary.model 污染仪表盘。
+      const model = YAML.parse(content)?.model
+      if (typeof model === 'string') modelName = model
+      else if (model && typeof model === 'object' && !Array.isArray(model)) {
+        modelName = typeof model.default === 'string' ? model.default : typeof model.model === 'string' ? model.model : ''
+        baseUrl = typeof model.base_url === 'string' ? model.base_url : ''
+        provider = typeof model.provider === 'string' ? model.provider : ''
       }
     } catch {}
     try {

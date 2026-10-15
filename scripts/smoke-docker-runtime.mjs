@@ -7,7 +7,9 @@ import fs from 'node:fs'
 const image = process.argv[2]
 if (!image) throw new Error('需要待验证的镜像名称')
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-const policy = JSON.parse(fs.readFileSync(new URL('../openclaw-version-policy.json', import.meta.url), 'utf8'))
+// 可从候选 checkout 读取纯 JSON 版本策略；验收脚本本身仍来自可信 checkout。
+const policy = JSON.parse(fs.readFileSync(process.argv[3] || new URL('../openclaw-version-policy.json', import.meta.url), 'utf8'))
+assert.match(policy.default?.official?.recommended || '', /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/)
 const run = args => {
   const result = spawnSync('docker', args, { encoding: 'utf8', timeout: 120000, windowsHide: true })
   assert.equal(result.status, 0, result.error?.message || result.stderr)
