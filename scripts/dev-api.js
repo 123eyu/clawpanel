@@ -9225,7 +9225,8 @@ function gatewayErrorLogSize() {
   }
 }
 
-async function waitForGatewayRunning(label = 'ai.openclaw.gateway', timeoutMs = 10000, errorLogOffset = 0) {
+// 首次加载插件可能超过 10 秒；异步等待真实监听，不重启或重复拉起进程。
+async function waitForGatewayRunning(label = 'ai.openclaw.gateway', timeoutMs = 60000, errorLogOffset = 0) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const status = await getLocalGatewayRuntime(label)
@@ -12999,16 +13000,16 @@ const handlers = {
       const errorLogOffset = gatewayErrorLogSize()
       if (isMac) {
         macStartService(label)
-        await waitForGatewayRunning(label, 10000, errorLogOffset)
+        await waitForGatewayRunning(label, 60000, errorLogOffset)
         return true
       }
       if (isLinux) {
         linuxStartGateway()
-        await waitForGatewayRunning(label, 10000, errorLogOffset)
+        await waitForGatewayRunning(label, 60000, errorLogOffset)
         return true
       }
       winStartGateway()
-      await waitForGatewayRunning(label, 10000, errorLogOffset)
+      await waitForGatewayRunning(label, 60000, errorLogOffset)
       return true
     })
   },

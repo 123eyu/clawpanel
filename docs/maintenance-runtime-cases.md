@@ -30,6 +30,7 @@
 | Gateway sidecar 尚未就绪（实测红灯后登记） | 仅对服务端明确返回 UNAVAILABLE/retryable=true 的启动中状态按 retryAfterMs 有界重试，保留回执；认证/签名错误不重试、不降级、不当成功 |
 | Hermes 版本命令契约（实测红灯后登记） | 独立版本核验使用发行物真实支持的 --version，不将不存在的 version 子命令误报为安装失败；API 与实际 CLI 精确版本仍须一致 |
 | Hermes 顶层模型被子配置污染（真实 HTTP 红灯后登记） | 同步 maintenance-model 后，即使模板后面含 stt.model/辅助模型与行尾注释，hermes_read_config 也须只返回顶层模型与同步的 base URL，不修改其余配置 |
+| 原生 Linux 冷启动超过 10 秒（托管容器红灯后登记） | 首轮 GitHub 容器在 10.66 秒正常监听，生产 API 在第 10 秒提前失败。启动等待须异步且有界至 60 秒，已运行立即返回，超时仍保留本次日志；不重启、不重复拉起、不以测试重试掩盖生产错误。真实容器必须完成聊天、Provider 回执和停止验收 |
 
 ## 范围
 
