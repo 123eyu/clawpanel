@@ -13,7 +13,7 @@ export async function selectCandidate(api, root, report) {
   for (const choice of choices) {
     const source = policy.sources.find(item => item.id === choice.id)
     const sourceRevision = git(root, ['log', '-1', '--format=%H', '--', ...source.allowedPaths])
-    const key = digest({ id: choice.id, current: choice.current, target: choice.target, channel: choice.channel, sourceRevision, notes: digest(choice.releaseNotes) })
+    const key = digest({ id: choice.id, current: choice.current, target: choice.target, channel: choice.channel, sourceRevision, notes: choice.releaseNotesSha256 || digest(choice.releaseNotes) })
     report.candidateKey = key
     const branch = `codex/maintenance-${key.slice(0, 16)}`
     const existing = (await api.list(`/repos/${policy.repository}/pulls?state=all&head=${policy.repository.split('/')[0]}:${branch}&per_page=100`)).find(pr => pr.head?.ref === branch)

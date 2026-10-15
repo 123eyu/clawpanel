@@ -57,14 +57,44 @@ export class Sources {
     if (next) throw new Error('GitHub 分页超过预算，结果未完整读取')
     return items
   }
-  async releases(repo) {
-    const key = `releases:${repo}`
-    // 版本发现只取近期窗口；精确通道目标另按 tag 核对，不遍历几千个历史发布。
-    if (!this.cache.has(key)) this.cache.set(key, this.get(`/repos/${repo}/releases?per_page=100`).then(items => {
-      if (!Array.isArray(items)) throw new Error('Release 返回结构错误')
-      if (items.some(item => typeof item.draft !== 'boolean' || typeof item.prerelease !== 'boolean' || typeof item.tag_name !== 'string' || (!item.draft && !Number.isFinite(Date.parse(item.published_at))))) throw new Error('Release 通道或发布时间字段缺失')
-      return items
+  validateReleases(items) {
+    if (!Array.isArray(items) || items.length > 100) throw new Error('Release 分页返回结构或条数错误')
+    if (items.some(item => !item || typeof item.draft !== 'boolean' || typeof item.prerelease !== 'boolean' || typeof item.tag_name !== 'string' || (!item.draft && !Number.isFinite(Date.parse(item.published_at))))) throw new Error('Release 通道或发布时间字段缺失')
+    return items
+  }
+  async releasePage(repo) {
+    const key = `release-page:${repo}`
+    if (!this.cache.has(key)) this.cache.set(key, this.request(`${this.github}/repos/${repo}/releases?per_page=100`).then(page => {
+      this.validateReleases(page.data)
+      return page
     }))
+    return this.cache.get(key)
+  }
+  async releases(repo) { return (await this.releasePage(repo)).data }
+  async releaseHistory(repo) {
+    const key = `release-history:${repo}`
+    if (!this.cache.has(key)) this.cache.set(key, (async () => {
+      const items = [], first = new URL(`${this.github}/repos/${repo}/releases?per_page=100`)
+      let next = first.href, pages = 0
+      try {
+        // 只以可信分页终点证明集合完整；发现端点或较旧版本均不提前停止。
+        while (next && pages < policy.limits.pages) {
+          const page = pages++ === 0 ? await this.releasePage(repo) : await this.request(next)
+          items.push(...this.validateReleases(page.data))
+          next = /<([^>]+)>;\s*rel="next"/.exec(page.link)?.[1] || ''
+          if (!next && /rel\s*=\s*"?next\b/i.test(page.link)) throw new Error('Release 分页链接格式错误')
+          if (next) {
+            const url = new URL(next)
+            const canonical = /^\/repositories\/\d+\/releases$/.test(url.pathname)
+            if (url.origin !== first.origin || (url.pathname !== first.pathname && !canonical) || url.username || url.password || url.hash || url.searchParams.get('per_page') !== '100' || url.searchParams.get('page') !== String(pages + 1) || [...url.searchParams.keys()].some(k => !['page', 'per_page'].includes(k)) || [...url.searchParams].length !== 2) throw new Error('Release 分页地址越界或页码不连续')
+          }
+        }
+        if (next) throw new Error('Release 分页超过预算，发布范围未完整读取')
+        return { items, complete: true, pages, reasons: [] }
+      } catch (error) {
+        return { items, complete: false, pages, reasons: [`Release 分页范围不完整：${error.message}`] }
+      }
+    })())
     return this.cache.get(key)
   }
   async npm(name, selector = null) {

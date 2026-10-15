@@ -158,7 +158,7 @@ function issue(number, extra = {}) {
 
 function fixtures(scenario, root) {
   const panelVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version
-  const state = { scenario, packages: {}, releases: {}, issues: [], pulls: [], issueComments: {}, reviews: {}, reviewComments: {}, events: {}, trackers: [], unknown: [], gitRefs: {}, gitCommits: {}, pullCreateAttempts: 0 }
+  const state = { scenario, packages: {}, releases: {}, docs: {}, issues: [], pulls: [], issueComments: {}, reviews: {}, reviewComments: {}, events: {}, trackers: [], unknown: [], gitRefs: {}, gitCommits: {}, pullCreateAttempts: 0 }
   for (const source of sourcePolicy.sources) {
     const current = sourceVersions[source.id]
     const changed = source.id === 'pi' && !['scan-no-change', 'scan-no-downgrade', 'scan-notify-ahead', 'guard-no-change'].includes(scenario)
@@ -280,6 +280,7 @@ async function fixtureServer(scenario, root) {
     const url = new URL(req.url, base)
     let name = decodeURIComponent(url.pathname)
     name = name.replace(/^\/repositories\/123456(?=\/)/, '/repos/qingchencloud/clawpanel')
+    name = name.replace(/^\/repositories\/654321(?=\/)/, '/repos/earendil-works/pi')
     const send = (data, status = 200, headers = {}) => {
       record.status = status
       res.writeHead(status, { 'content-type': 'application/json', ...headers })
@@ -346,8 +347,26 @@ async function fixtureServer(scenario, root) {
       const metadata = exact && state.packages[exact[1]]?.versions?.[exact[2]]
       return send(metadata || { error: 'unknown fixture package version' }, metadata ? 200 : 404)
     }
+    if (/^\/repos\/.+\/contents\//.test(name)) {
+      const doc = state.docs[name + '?ref=' + url.searchParams.get('ref')]
+      return send(doc?.data || { message: 'Missing fixture release evidence' }, doc?.status || (doc ? 200 : 404))
+    }
     const releases = /^\/repos\/(.+\/[^/]+)\/releases$/.exec(name)
-    if (releases) return send(state.releases?.[releases[1]] || [])
+    if (releases) {
+      const pagination = state.releasePages?.[releases[1]]
+      if (pagination) {
+        const page = Number(url.searchParams.get('page') || 1)
+        const rows = pagination.pages[page - 1] || []
+        if (pagination.brokenPage === page) return send({ message: 'Invalid release page fixture' })
+        if (pagination.endless || page < pagination.pages.length || (page === 1 && pagination.next)) {
+          url.searchParams.set('page', String(page + 1))
+          if (pagination.canonical) url.pathname = '/repositories/654321/releases'
+          return send(rows, 200, { link: `<${pagination.next || url.href}>; rel="next"` })
+        }
+        return send(rows)
+      }
+      return send(state.releases?.[releases[1]] || [])
+    }
     if (name === panel + '/commits/main') {
       state.baseTreeSha ||= await git(root, 'rev-parse', 'HEAD^{tree}')
       return send({ sha: state.mainSha, commit: { tree: { sha: state.baseTreeSha } } })
@@ -583,7 +602,308 @@ async function guardCall(ctx, scan, patch, mutate = () => {}) {
   return ctx.call('guard', ['--root', ctx.root, '--report', reportFile, '--patch', patchFile, '--result', resultFile])
 }
 
+async function runReviewFindings(ctx) {
+  const state = ctx.mock.state, source = sourcePolicy.sources.find(s => s.id === 'pi')
+  const current = sourceVersions.pi, middle = patchVersion(current), target = patchVersion(current, 2)
+  const tag = source.tagPrefix + target, currentTag = source.tagPrefix + current
+  const documentKey = name => `/repos/${source.repository}/contents/${name}?ref=${tag}`
+  const doc = (name, body, mutate = () => {}) => {
+    const bytes = Buffer.from(body)
+    const data = { type: 'file', path: name, encoding: 'base64', size: bytes.length, sha: createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes])).digest('hex'), content: bytes.toString('base64') }
+    mutate(data)
+    state.docs[documentKey(name)] = { data }
+  }
+  const link = name => `[Full Changelog](https://github.com/${source.repository}/blob/main/${name})`
+  const reset = (body, intermediate = false) => {
+    const pack = state.packages[source.package]
+    pack['dist-tags'][source.channel] = target
+    pack.versions[target] = { ...pack.versions[current], version: target }
+    state.releases[source.repository] = [release(source.repository, currentTag), ...(intermediate ? [release(source.repository, source.tagPrefix + middle, { body: 'Routine model labels.' })] : []), release(source.repository, tag, { body })]
+    state.docs = {}
+    state.releasePages = {}
+  }
+  const collect = async suffix => {
+    writeJson(path.join(ctx.evidence, suffix + '-inputs.json'), { releases: state.releases[source.repository], pagination: state.releasePages, docs: state.docs })
+    const start = ctx.mock.requests.length
+    const result = await ctx.scan(suffix)
+    assertSuccess(result)
+    const report = assertReport(result, ctx)
+    const candidate = report.candidates.find(item => item.id === 'pi')
+    assert.ok(candidate, suffix + ': 缺少候选及缺口说明')
+    return { result, report, candidate, requests: ctx.mock.requests.slice(start) }
+  }
+  const high = run => {
+    assert.equal(run.candidate.risk, 'high', '缺口或敏感变更必须high')
+    assert.equal(run.report.selected, null)
+    assert.equal(run.report.needsConfirmation, true)
+  }
+  const ordinary = run => {
+    assert.equal(run.candidate.risk, 'medium')
+    assert.equal(run.candidate.releaseReview.complete, true)
+    assert.equal(run.report.selected?.id, 'pi')
+  }
+  const contents = run => run.requests.filter(r => r.url.includes('/contents/'))
+  if (ctx.item.id === 'scan-release-link-syntax') {
+    const compare = `https://github.com/${source.repository}/compare/${currentTag}...${tag}`
+    const official = `https://github.com/${source.repository}/blob/main/CHANGELOG.md`
+    for (const [name, body] of Object.entries({ bare: `**Full Changelog**: ${compare}`, auto: `Full Changelog: <${compare}>`, reference: `[Full Changelog][all]\n\n[all]: ${compare}`, missing: '[Full Changelog][missing]', external: '[Full Changelog][all]\n\n[all]: https://example.invalid/CHANGELOG.md' })) {
+      reset(body)
+      const run = await collect(name)
+      high(run)
+      assert.equal(run.candidate.releaseReview.complete, false)
+      assert.equal(contents(run).length, 0)
+    }
+    for (const [name, body] of Object.entries({ raw: `Changelog: ${official}`, autolink: `Changelog: <${official}>`, reference: `[Full Changelog][ALL]\n\n[all]: ${official}`, collapsed: `[Full Changelog][]\n\n[Full Changelog]: ${official}`, shortcut: `[Full Changelog]\n\n[Full Changelog]: ${official}` })) {
+      reset(body)
+      doc('CHANGELOG.md', `# Changelog\n## ${target}\nFix display labels.\n## ${current}\nHistorical authentication change.\n`)
+      const run = await collect('official-' + name)
+      ordinary(run)
+      assert.equal(contents(run).length, 1)
+      assert.match(run.candidate.releaseNotes, /Fix display labels/)
+      assert.doesNotMatch(run.candidate.releaseNotes, /Historical authentication/)
+      assert.ok(contents(run).every(r => new URL(r.url, ctx.mock.url).searchParams.get('ref') === tag))
+    }
+  } else if (ctx.item.id === 'scan-release-heading-index') {
+    for (const variant of ['danger', 'missing', 'safe', 'reference-safe', 'nested-safe']) {
+      reset(link('CHANGELOG.md'), true)
+      doc('CHANGELOG.md', `# Changelog\n## ${target}\n[Full release notes](CHANGELOG/${target}.md)\n## ${middle}\n[Full release notes](CHANGELOG/${middle}.md)\n## ${current}\n[Full release notes](CHANGELOG/${current}.md)\n`)
+      if (variant === 'reference-safe') doc('CHANGELOG.md', `# Changelog\n## ${target}\n[Full release notes][target]\n## ${middle}\n[Full release notes][middle]\n## ${current}\nPrevious version.\n\n[target]: CHANGELOG/${target}.md\n[middle]: CHANGELOG/${middle}.md\n`)
+      doc(`CHANGELOG/${target}.md`, `# ${target}\nFix display labels.\n`)
+      if (variant !== 'missing') doc(`CHANGELOG/${middle}.md`, `# ${middle}\n${variant === 'danger' ? 'Fix authentication rejection.' : 'Fix model display labels.'}\n`)
+      if (variant === 'nested-safe') {
+        doc(`CHANGELOG/${target}.md`, `[Full release notes](detail/${target}.md)`)
+        doc(`CHANGELOG/detail/${target}.md`, `# ${target}\nFix display labels.\n`)
+      }
+      const run = await collect(variant)
+      if (variant.endsWith('safe')) ordinary(run)
+      else high(run)
+      assert.equal(contents(run).length, variant === 'nested-safe' ? 4 : 3, '必须读取升级区间全部分片，不读取历史基线分片')
+      if (variant === 'missing') assert.equal(run.candidate.releaseReview.complete, false)
+    }
+  } else if (ctx.item.id === 'scan-release-shard-binding') {
+    for (const variant of ['aliased', 'wrong-header', 'shared-complete', 'reference-complete', 'release-aliased']) {
+      reset(link('CHANGELOG.md'), true)
+      const shard = variant === 'shared-complete' ? 'CHANGELOG/shared.md' : `CHANGELOG/${target}.md`
+      doc('CHANGELOG.md', `# Changelog\n<!-- split-changelog -->\n[${target}](${shard})\n[${middle}](${shard})\n`)
+      doc(shard, variant === 'shared-complete' ? `## ${target}\nFix labels.\n## ${middle}\nFix model labels.\n## ${current}\nHistorical authentication change.\n` : `# ${variant === 'wrong-header' ? current : target}\nRoutine labels.\n`)
+      if (variant === 'reference-complete') {
+        doc('CHANGELOG.md', `# Changelog\n<!-- split-changelog -->\n[${target}][new]\n[${middle}][mid]\n\n[new]: CHANGELOG/${target}.md\n[mid]: CHANGELOG/${middle}.md\n`)
+        doc(`CHANGELOG/${middle}.md`, `# ${middle}\nFix labels.\n`)
+      }
+      if (variant === 'release-aliased') state.releases[source.repository].find(r => r.tag_name === tag).body = link(`CHANGELOG/${middle}.md`)
+      if (variant === 'release-aliased') doc(`CHANGELOG/${middle}.md`, `# ${middle}\nFix labels.\n`)
+      const run = await collect(variant)
+      if (variant.endsWith('complete')) {
+        ordinary(run)
+        assert.doesNotMatch(run.candidate.releaseNotes, /Historical authentication/)
+      } else {
+        high(run)
+        assert.equal(run.candidate.releaseReview.complete, false, '链接标签不等于实际版本覆盖')
+      }
+    }
+  } else if (ctx.item.id === 'scan-release-version-label-index') {
+    for (const variant of ['danger', 'missing', 'wrong-version', 'safe', 'reference-safe', 'wrong-label']) {
+      reset(link('CHANGELOG.md'), true)
+      doc('CHANGELOG.md', variant === 'reference-safe' ? `# Changelog\n## ${target}\n[${target}][new]\n## ${middle}\n[${middle}][mid]\n## ${current}\nHistorical version.\n\n[new]: notes/${target}.md\n[mid]: notes/${middle}.md\n` : `# Changelog\n## ${target}\n[${target}](notes/${target}.md)\n## ${middle}\n[${middle}](notes/${variant === 'wrong-version' ? target : middle}.md)\n## ${current}\n[${current}](notes/${current}.md)\n`)
+      doc(`notes/${target}.md`, `# ${target}\nFix display labels.\n`)
+      if (variant !== 'missing') doc(`notes/${middle}.md`, `# ${middle}\n${variant === 'danger' ? 'Fix authentication rejection.' : 'Fix model labels.'}\n`)
+      if (variant === 'wrong-label') doc('CHANGELOG.md', `# Changelog\n## ${target}\n[${middle}](notes/${middle}.md)\nSee details below.\n## ${middle}\nFix model labels.\n## ${current}\nHistorical version.\n`)
+      const run = await collect(variant)
+      if (variant.endsWith('safe')) ordinary(run)
+      else high(run)
+      if (!['wrong-version', 'wrong-label'].includes(variant)) assert.equal(contents(run).length, 3, '版本label本身必须触发分片读取，基线分片不读取')
+      if (['missing', 'wrong-version', 'wrong-label'].includes(variant)) assert.equal(run.candidate.releaseReview.complete, false)
+    }
+  } else if (ctx.item.id === 'scan-release-empty-version-section') {
+    const empty = { blank: ' \n\t', comment: '<!-- TODO -->', multiline: '<!--\nFix authentication rejection.\n-->', heading: '### Changes\n', nested: '### Changes\n#### Details\n<!-- later -->', linkOnly: '[Details](notes/missing.md)', commentLink: `<!-- [${middle}](notes/${middle}.md) -->` }
+    for (const [variant, body] of Object.entries(empty)) {
+      reset(link('CHANGELOG.md'), true)
+      doc('CHANGELOG.md', `# Changelog\n## ${target}\nFix final labels.\n## ${middle}\n${body}\n## ${current}\nHistorical authentication change.\n`)
+      if (variant === 'commentLink') doc(`notes/${middle}.md`, `# ${middle}\nFix ordinary model labels.\n`)
+      const run = await collect(variant)
+      high(run)
+      assert.equal(run.candidate.releaseReview.complete, false, '标题或注释不是完整发布正文')
+      assert.match(run.candidate.reasons.join('\n'), /正文|空|覆盖|分片/)
+      if (['comment', 'multiline', 'commentLink'].includes(variant)) assert.equal(contents(run).length, 1, '注释不是可见正文或分片入口')
+    }
+    reset(link('CHANGELOG.md'), true)
+    doc('CHANGELOG.md', `# Changelog\n## ${target}\nFix final labels.\n## ${middle}\n### Changes\nFix model display labels.\n## ${current}\n`)
+    ordinary(await collect('ordinary-body'))
+  } else if (ctx.item.id === 'scan-release-sensitive-language') {
+    const messages = ['Auth: reject expired sessions.', 'Prevent command injection when launching external tools.', 'Fix shell injection in the tool runner.', 'Fix remote code execution in the runner.', 'BREAKING: removed legacy configuration options.', 'BREAKING CHANGE: replace the old config format.']
+    for (let i = 0; i < messages.length; i++) { reset(messages[i]); high(await collect('sensitive-' + i)) }
+    reset('Fix author display labels and chart execution duration formatting.')
+    ordinary(await collect('ordinary'))
+  } else if (ctx.item.id === 'scan-release-history-pagination') {
+    const old = Array.from({ length: 98 }, (_, i) => release(source.repository, `v0.0.${i}`))
+    for (const variant of ['danger', 'canonical', 'cap', 'broken', 'foreign', 'cycle']) {
+      reset('Routine final display fix.')
+      const first = [release(source.repository, tag, { body: 'Routine final display fix.' }), release(source.repository, currentTag), ...old]
+      state.releasePages[source.repository] = { pages: [first, [release(source.repository, source.tagPrefix + middle, { body: 'Fix authentication rejection.' })]], canonical: variant === 'canonical', endless: variant === 'cap', brokenPage: variant === 'broken' ? 2 : null, next: variant === 'foreign' ? 'https://example.invalid/releases?page=2' : variant === 'cycle' ? `${ctx.mock.url}/repos/${source.repository}/releases?per_page=100&page=1` : null }
+      const run = await collect(variant)
+      high(run)
+      const requests = run.requests.filter(r => /\/(?:releases)(?:\?|$)/.test(r.url) && (r.url.includes(source.repository) || r.url.includes('654321')))
+      if (['danger', 'canonical'].includes(variant)) {
+        assert.equal(requests.length, 2, '首屏即有端点也必须读到分页终点，且不重复取首屏')
+        assert.ok(run.candidate.releaseReview.tags.includes(source.tagPrefix + middle))
+        assert.match(run.candidate.releaseNotes, /Fix authentication rejection/)
+        assert.equal(run.candidate.releaseReview.complete, true)
+      } else {
+        assert.equal(run.candidate.releaseReview.complete, false)
+        assert.ok(requests.length <= sourcePolicy.limits.pages, '分页必须在可信预算内停止')
+        assert.match(run.candidate.reasons.join('\n'), /分页|预算|范围|完整/)
+      }
+    }
+  } else if (ctx.item.id === 'scan-release-failed-request-budget') {
+    for (const variant of ['same-404', 'same-hash', 'distinct-404']) {
+      const names = Array.from({ length: 40 }, (_, i) => variant === 'distinct-404' ? `CHANGELOG-${i}.md` : 'CHANGELOG.md')
+      reset(names.map(link).join('\n'))
+      if (variant === 'same-hash') doc('CHANGELOG.md', 'Bad hash fixture.', data => { data.sha = '0'.repeat(40) })
+      const run = await collect(variant)
+      high(run)
+      assert.equal(run.candidate.releaseReview.complete, false)
+      if (variant === 'distinct-404') {
+        assert.equal(contents(run).length, 16, '失败请求同样消耗16份材料预算')
+        assert.match(run.candidate.reasons.join('\n'), /预算/)
+      } else assert.equal(contents(run).length, 1, '同路径的失败响应必须缓存，不能重复请求')
+    }
+  } else if (ctx.item.id === 'scan-release-build-order-stability') {
+    reset('Routine final display fix.')
+    state.releases[source.repository].push(release(source.repository, source.tagPrefix + middle + '+linux', { body: 'Linux display labels.' }), release(source.repository, source.tagPrefix + middle + '+windows', { body: 'Windows display labels.' }))
+    const first = await collect('first')
+    ordinary(first)
+    state.releases[source.repository].reverse()
+    const reordered = await collect('reordered')
+    ordinary(reordered)
+    assert.equal(reordered.candidate.releaseNotesSha256, first.candidate.releaseNotesSha256, '等价版本必须有确定性排序')
+    assert.equal(reordered.report.fingerprint, first.report.fingerprint)
+    assert.equal(reordered.report.candidateKey, first.report.candidateKey)
+    state.trackers.push(issue(954, { title: '[Maintenance] 每日维护待确认', user: { login: 'github-actions[bot]', type: 'Bot' }, body: `<!-- clawpanel-maintenance:${first.report.fingerprint} -->\n<!-- clawpanel-maintenance-blocked:${first.report.candidateKey} -->` }))
+    const blocked = await collect('blocked-reordered')
+    assert.equal(blocked.report.selected, null)
+    assert.equal(blocked.report.blockedCandidateKey, first.report.candidateKey)
+    assert.equal(blocked.report.needsConfirmation, true)
+  }
+  assert.ok(ctx.mock.requests.every(r => r.method === 'GET'), '复核场景不得写入上游')
+}
+
+async function runReleaseReview(ctx) {
+  const id = ctx.item.id, state = ctx.mock.state
+  if (id === 'scan-release-calendar-mismatch') {
+    const hermes = sourcePolicy.sources.find(s => s.id === 'hermes')
+    const currentTag = new RegExp(hermes.tagBaseline.pattern).exec(fs.readFileSync(path.join(ctx.root, hermes.tagBaseline.path), 'utf8'))[1]
+    state.releases[hermes.repository] = [release(hermes.repository, currentTag), release(hermes.repository, hermes.tagPrefix + patchVersion(sourceVersions.hermes), { published_at: daysAgo(0.1) })]
+    const result = await ctx.scan()
+    assertSuccess(result)
+    assert.equal(result.report.candidates.find(c => c.id === 'hermes')?.risk, 'high')
+    assert.notEqual(result.report.selected?.id, 'hermes')
+    return
+  }
+  const source = sourcePolicy.sources.find(s => s.id === 'pi'), current = sourceVersions.pi, target = patchVersion(current)
+  const tag = source.tagPrefix + target, currentTag = source.tagPrefix + current
+  const entry = state.releases[source.repository].find(r => r.tag_name === tag)
+  assert.ok(entry)
+  const doc = (name, body, mutate = () => {}) => {
+    const bytes = Buffer.from(body)
+    const data = { type: 'file', path: name, encoding: 'base64', size: bytes.length, sha: createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes])).digest('hex'), content: bytes.toString('base64') }
+    mutate(data)
+    state.docs[`/repos/${source.repository}/contents/${name}?ref=${tag}`] = { data }
+  }
+  const link = name => `Full release notes: [Complete changelog](https://github.com/${source.repository}/blob/main/${name})`
+  if (id === 'scan-release-empty') {
+    const empty = { empty: '', whitespace: ' \n\t', comment: '<!-- Routine formatting fix. -->', multiline: '<!--\nRoutine formatting fix.\n-->', heading: `# ${tag}`, headings: `# ${tag}\n## Changes\n`, commentLink: `<!-- ${link('CHANGELOG.md')} -->`, unresolved: '[Read details][missing]' }
+    doc('CHANGELOG.md', `# Changelog\n## ${target}\nFix display labels.\n## ${current}\nHistorical authentication change.\n`)
+    for (const [variant, body] of Object.entries(empty)) {
+      entry.body = body
+      writeJson(path.join(ctx.evidence, variant + '-inputs.json'), { releases: state.releases[source.repository], docs: state.docs })
+      const start = ctx.mock.requests.length
+      const result = await ctx.scan(variant)
+      assertSuccess(result)
+      const report = assertReport(result, ctx), candidate = report.candidates.find(r => r.id === 'pi')
+      assert.equal(candidate?.risk, 'high', variant + ': Release本身也须fail closed')
+      assert.equal(candidate.releaseReview.complete, false, variant)
+      assert.equal(report.selected, null)
+      assert.equal(report.needsConfirmation, true)
+      assert.equal(ctx.mock.requests.slice(start).filter(r => r.url.includes('/contents/')).length, 0, '注释或未解析链接不是材料入口')
+    }
+    for (const [variant, body] of Object.entries({ prose: 'Fix ordinary model display labels.', reference: link('CHANGELOG.md') })) {
+      entry.body = body
+      writeJson(path.join(ctx.evidence, variant + '-inputs.json'), { releases: state.releases[source.repository], docs: state.docs })
+      const result = await ctx.scan(variant)
+      assertSuccess(result)
+      const report = assertReport(result, ctx), candidate = report.candidates.find(r => r.id === 'pi')
+      assert.equal(candidate?.risk, 'medium', '真实正文或有效引用不可永久阻断')
+      assert.equal(candidate.releaseReview.complete, true)
+      assert.equal(report.selected?.id, 'pi')
+      if (variant === 'reference') assert.equal(candidate.releaseReview.documents.length, 1)
+    }
+    return
+  }
+  let expectedHigh = true
+  if (id === 'scan-release-compare-only') entry.body = `[Full Changelog](https://github.com/${source.repository}/compare/${currentTag}...${tag})`
+  else if (id === 'scan-release-loop') {
+    entry.body = link('CHANGELOG.md')
+    doc('CHANGELOG.md', `<!-- split-changelog -->\n- [${target}](CHANGELOG.md)\n`)
+  } else if (id === 'scan-release-intermediate') {
+    entry.body = 'Fix credential resolution before network requests.'
+    const next = patchVersion(current, 2)
+    state.packages[source.package]['dist-tags'][source.channel] = next
+    state.packages[source.package].versions[next] = { ...state.packages[source.package].versions[target], version: next }
+    state.releases[source.repository].unshift(release(source.repository, source.tagPrefix + next, { body: 'Final routine formatting fix.' }))
+  } else if (id === 'scan-release-pty') entry.body = 'Validate PTY connection origins and tickets before checking whether a PTY exists.'
+  else if (id === 'scan-release-missing-baseline') state.releases[source.repository] = [entry]
+  else if (id === 'scan-release-untrusted-link') entry.body = 'Full release notes: [Complete changelog](https://example.invalid/private/CHANGELOG.md)'
+  else if (id === 'scan-release-split-index') {
+    entry.body = link('CHANGELOG.md')
+    doc('CHANGELOG.md', `# Changelog\n<!-- split-changelog -->\n- [${target}](CHANGELOG/${target}.md)\n- [${current}](CHANGELOG/${current}.md)\n`)
+    doc(`CHANGELOG/${target}.md`, `# ${target}\nFix protected outbound SSRF validation.\n`)
+  } else {
+    entry.body = link('CHANGELOG.md')
+    expectedHigh = id !== 'scan-release-linked-safe'
+    doc('CHANGELOG.md', `# Changelog\n\n## ${target}\n${expectedHigh ? 'Fix authentication rejection and process spawn validation.' : 'Fix model display labels.'}\n\n## ${current}\nHistorical authentication change must not contaminate the new interval.\n`)
+  }
+  if (id === 'scan-release-evidence-errors') {
+    const saved = structuredClone(state.docs)
+    for (const variant of ['missing', 'hash', 'symlink', 'encoding', 'size']) {
+      state.docs = structuredClone(saved)
+      const file = state.docs[`/repos/${source.repository}/contents/CHANGELOG.md?ref=${tag}`]
+      if (variant === 'missing') file.status = 404
+      if (variant === 'hash') file.data.sha = '0'.repeat(40)
+      if (variant === 'symlink') file.data.type = 'symlink'
+      if (variant === 'encoding') file.data.encoding = 'none'
+      if (variant === 'size') file.data.size = 16 * 1024 * 1024
+      const result = await ctx.scan('release-' + variant)
+      assert.equal(result.report.selected, null, variant + ': 不完整证据不得进入适配')
+      assert.ok(result.report.needsConfirmation, variant)
+      const candidate = result.report.candidates.find(r => r.id === 'pi')
+      assert.ok(!result.report.complete || candidate?.risk === 'high', variant)
+    }
+    return
+  }
+  writeJson(path.join(ctx.evidence, 'release-inputs.json'), { releases: state.releases[source.repository], docs: state.docs })
+  const result = await ctx.scan()
+  assertSuccess(result)
+  const candidate = result.report.candidates.find(r => r.id === 'pi')
+  assert.ok(candidate)
+  assert.equal(candidate.risk === 'high', expectedHigh, id)
+  if (expectedHigh) { assert.equal(result.report.selected, null); assert.equal(result.report.needsConfirmation, true) }
+  else {
+    assert.equal(result.report.selected.id, 'pi')
+    assert.equal(candidate.releaseReview.complete, true)
+    assert.match(candidate.releaseNotes, /Fix model display labels/)
+    assert.doesNotMatch(candidate.releaseNotes, /Historical authentication/)
+    assert.ok(candidate.releaseReview.documents.length > 0)
+  }
+  if (id.includes('linked') || id.includes('split')) {
+    const requests = ctx.mock.requests.filter(r => r.url.includes('/contents/'))
+    assert.ok(requests.length > 0, '必须实际读取精确版本官方材料')
+    assert.ok(requests.every(r => new URL(r.url, ctx.mock.url).searchParams.get('ref') === tag), '不得使用输入中的浮动main')
+  }
+  assert.ok(ctx.mock.requests.every(r => r.method === 'GET'), '审查不得写入上游')
+}
+
 async function runScan(ctx) {
+  if (ctx.item.group === 'release-review') return runReleaseReview(ctx)
   const id = ctx.item.id
   const sha256 = value => createHash('sha256').update(value).digest('hex')
   const readBody = (scan, object, expected) => {
@@ -1304,7 +1624,8 @@ async function runCase(item) {
   let failure
   try {
     ctx = await context(item)
-    if (item.group === 'scan') await runScan(ctx)
+    if (item.group === 'review-findings' || item.group === 'review-boundaries') await runReviewFindings(ctx)
+    else if (item.group === 'scan' || item.group === 'release-review') await runScan(ctx)
     else if (item.group === 'guard') await runGuard(ctx)
     else if (item.group === 'notify') await runNotify(ctx)
     else if (item.group === 'propose') await runPropose(ctx)

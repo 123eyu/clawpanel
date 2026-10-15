@@ -7,6 +7,10 @@ export function renderReport(report) {
   for (const item of report.sources) lines.push(`| ${cell(item.id)} | ${cell(item.current)} | ${cell(item.target)} (${cell(item.channel)}) | ${cell(item.risk)} |`)
   for (const item of report.sources.filter(item => item.status !== 'current' || item.risk === 'high')) {
     lines.push('', `### ${cell(item.id)}：${cell(item.current)} → ${cell(item.targetTag || item.target)}`, `- 判断：${cell(item.risk)}；${item.reasons.map(cell).join('；') || '需要真实兼容验收'}`, `- 来源：${item.source}`, `- 发布说明：${item.release || 'npm 元数据'}`, `- 源码对比入口（未将链接等同于已审查）：${item.compareUrl || '-'}`)
+    if (item.releaseReview) {
+      lines.push(`- 跨版本说明：${item.releaseReview.complete ? '范围与材料完整' : '有缺口，停止自动适配'}；${cell(item.releaseReview.fromTag)} → ${cell(item.releaseReview.toTag)}；${item.releaseReview.tags.length} 个版本；全文指纹 ${cell(item.releaseNotesSha256)}`)
+      for (const doc of item.releaseReview.documents) lines.push(`  - ${cell(doc.url)}；${doc.bytes} 字节；SHA256 ${cell(doc.sha256)}`)
+    }
   }
   for (const [key, title] of [['issues', '发版后更新的 Issue'], ['pullRequests', '发版后更新的 PR（不自动合并）'], ['backlogIssues', '历史未关闭 Issue（本轮不自动关闭）']]) {
     lines.push('', `## ${title}`)

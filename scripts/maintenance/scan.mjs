@@ -4,15 +4,15 @@ import { baseline, digest, git, newer, policy, prerelease, readJson, redact, ver
 import { renderReport, renderPrompt } from './report.mjs'
 import { selectCandidate } from './selection.mjs'
 import { FeedbackStore, redactFeedback, validateFeedbackMaterials } from './feedback.mjs'
+import { reviewReleaseRange, sensitiveReleaseChange } from './release-review.mjs'
 
-const breaking = /breaking changes?|CVE-\d|\bsecurity (?:fix|advisory)|incompatible|schema migration|破坏性|不兼容|配置迁移/i
 const own = item => item.user?.type === 'Bot' && /<!-- clawpanel-maintenance(?:-candidate)?:/.test(item.body || '')
 const date = text => {
   if (!text || !Number.isFinite(Date.parse(text))) throw new Error('缺失或无效时间戳')
   return new Date(text).toISOString()
 }
 const text = (value, max = 10000) => redactFeedback(value).slice(0, max)
-const riskOf = value => breaking.test(value) || /security|vulnerability|凭据|鉴权|权限|安全/i.test(value) ? 'high' : 'medium'
+const riskOf = value => sensitiveReleaseChange.test(value) ? 'high' : 'medium'
 const bodyInfo = (item, feedback) => ({ ...feedback.capture(item.body), risk: riskOf(item.body || '') })
 const normalize = (item, feedback) => ({
   number: item.number, title: text(item.title, 500), ...feedback.capture(item.body), state: item.state,
@@ -65,11 +65,21 @@ async function inspectSource(api, root, source) {
     if (!record.integrity) reasons.push('候选 npm 包缺少完整性元数据')
   }
   if (source.repository && !release) reasons.push('npm 与官方 Release 尚未对应')
-  if (breaking.test(release?.body || '')) reasons.push('官方发布说明包含破坏性或安全变更')
+  const currentTag = source.tagBaseline ? baseline(root, source.tagBaseline) : source.tagPrefix + current
+  if (source.repository && release) {
+    const history = await api.releaseHistory(source.repository)
+    const review = await reviewReleaseRange(api, source, currentTag, release.tag_name, history)
+    const { raw, sensitive, reasons: gaps, ...evidence } = review
+    record.releaseReview = evidence
+    record.releaseNotes = text(raw)
+    record.releaseNotesSha256 = review.sha256
+    record.releaseNotesTruncated = raw.length > 10000
+    if (sensitive) reasons.push('跨版本官方完整说明包含认证、权限、执行、网络或破坏性变更')
+    if (!review.complete) reasons.push(...gaps)
+  } else if (sensitiveReleaseChange.test(release?.body || '')) reasons.push('官方发布说明包含破坏性或安全变更')
   if (record.releaseNotesTruncated) reasons.push('发布说明超过自动审查上下文预算，需完整人工复查')
   if (current.split('.')[0] !== target.split('.')[0]) reasons.push('跨主版本变化')
   if (source.plugin) reasons.push('消息渠道插件需要宿主兼容及真实账号链路确认')
-  const currentTag = source.tagBaseline ? baseline(root, source.tagBaseline) : source.tagPrefix + current
   return { ...record, status: 'update', risk: reasons.length ? 'high' : 'medium', reasons, compareUrl: source.repository ? `https://github.com/${source.repository}/compare/${encodeURIComponent(currentTag)}...${encodeURIComponent(release?.tag_name || source.tagPrefix + target)}` : null }
 }
 
@@ -125,7 +135,7 @@ export async function scan(api, root, output) {
     if (report.complete) report.selected = report.candidates.find(item => item.risk !== 'high' && policy.sources.find(source => source.id === item.id).allowedPaths.length) || null
   } catch (error) { report.errors.push(redact(error.message)) }
   report.feedback = feedback?.manifest() || null
-  const fingerprint = () => digest({ sources: report.sources.map(({ id, current, target, targetTag, release, risk, releaseNotes, integrity }) => ({ id, current, target, targetTag, release, risk, notes: digest(releaseNotes), integrity })), issues: [...report.intake.issues, ...report.intake.backlogIssues], prs: report.intake.pullRequests, releasePeriod: report.intake.releasePeriod, errors: report.errors })
+  const fingerprint = () => digest({ sources: report.sources.map(({ id, current, target, targetTag, release, risk, releaseNotes, releaseNotesSha256, releaseReview, integrity }) => ({ id, current, target, targetTag, release, risk, notes: releaseNotesSha256 || digest(releaseNotes), releaseReview, integrity })), issues: [...report.intake.issues, ...report.intake.backlogIssues], prs: report.intake.pullRequests, releasePeriod: report.intake.releasePeriod, errors: report.errors })
   report.fingerprint = fingerprint()
   try { await selectCandidate(api, root, report) }
   catch (error) { report.errors.push(redact(error.message)); report.complete = false; report.selected = null; report.fingerprint = fingerprint() }
