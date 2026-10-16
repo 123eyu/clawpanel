@@ -740,6 +740,8 @@ try {
   }, 30000)
   await stage('candidate-schema', 'candidate package/lock/策略与版本声明合格；验收器从 tooling 执行', validateCandidate)
   await stage('isolation', '新 HOME 子进程路径回读全部位于本次目录；无继承凭据', async () => {
+    // parent 选择容器验收时，每个引擎都回读真实隔离事实；宿主只设变量不算通过。
+    if (process.env.MAINTENANCE_ISOLATED_RUNTIME === '1') requireInstallContainer()
     const source = "console.log(JSON.stringify({osHomedir:require('node:os').homedir(),...Object.fromEntries(['HOME','USERPROFILE','APPDATA','LOCALAPPDATA','XDG_CONFIG_HOME','XDG_CACHE_HOME','XDG_DATA_HOME','XDG_STATE_HOME','OPENCLAW_CONFIG_DIR','HERMES_HOME'].map(k=>[k,process.env[k]]))}))"
     const result = JSON.parse((await command(process.execPath, ['-e', source])).trim())
     for (const value of Object.values(result)) within(value)

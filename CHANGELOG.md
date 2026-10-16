@@ -19,6 +19,7 @@
 
 ### 修复 (Fixed)
 
+- 维护 CI 补齐 OpenCode、DSH 默认及预览的独立容器实装门禁，保留 OpenClaw/Hermes 原有验收；每项回读真实非特权隔离事实，不增加凭据或开启自动 AI/PR。
 - 修复 Hermes 聊天输入文字后发送按钮未启用的问题，保留原有发送状态和连接检查。
 - 面板退出登录或认证配置变更后，及时撤销 DSH/OpenCode 内嵌能力及已有连接；无效退出请求不撤销其他会话。
 - Web 后端读取 Gateway 首帧时正确处理关闭帧、Ping/Pong 和 HTTP Upgrade 同包数据，保留关闭状态码与原因；避免启动阶段的关闭帧被当成 JSON 或漏读 challenge，并及时清理读取监听。

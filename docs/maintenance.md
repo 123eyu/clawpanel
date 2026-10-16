@@ -20,7 +20,7 @@
 4. **draft**：仅三平台回归和独立容器运行验收都成功且显式开启候选 PR 功能时，使用仓库限定的 GitHub App 创建草稿；此 job 不执行候选代码、不安装其依赖。复核 `main` SHA，不强推已有分支，不重开人工关闭的候选。分支已创建但 PR 请求失败时，校验候选身份、patch 哈希和基线 parent 及实际 Git tree 后可恢复创建；不接管同名陌生分支。
 5. **notify**：高风险、不完整数据、适配/测试/草稿写入异常时，在机器人自有的一个汇总 Issue 通知。相同指纹不重复写入；可以配置明确的维护者账号提及。
 
-每个 job 有超时，同一时间只运行一轮每日维护；维护设施的 main 推送和 PR 均跑三平台控制器黑盒 E2E，PR 不触发线上采集或带凭据的 AI/通知 job。手工运行时启用 `runtime_selftest`，会额外在独立非特权 Linux 容器运行 OpenClaw/Hermes 基线验收，不依赖 AI 候选或 AI 凭据。发 tag 前须核对具体容器 job 实际执行成功及报告绑定同一 SHA；skipped 和历史绿灯不算通过。暂不自动重试 AI，避免无限消耗。失败/高风险候选身份写入自有汇总 Issue 的 `clawpanel-maintenance-blocked` 标记，后续保留待确认，不重复调用 AI；维护者复核后可删除该候选的 blocked 标记允许重试。定时任务可能延迟，本阶段未实现独立失活 watchdog。
+每个 job 有超时，同一时间只运行一轮每日维护；维护设施的 main 推送和 PR 均跑三平台控制器黑盒 E2E，PR 不触发线上采集或带凭据的 AI/通知 job。手工运行时启用 `runtime_selftest`，会额外在独立非特权 Linux 容器运行 OpenClaw、Hermes、OpenCode 和 DSH 默认/预览五项实装验收，不依赖 AI 候选或 AI 凭据。发 tag 前须核对具体容器 job 实际执行成功及报告绑定同一 SHA；skipped 和历史绿灯不算通过。暂不自动重试 AI，避免无限消耗。失败/高风险候选身份写入自有汇总 Issue 的 `clawpanel-maintenance-blocked` 标记，后续保留待确认，不重复调用 AI；维护者复核后可删除该候选的 blocked 标记允许重试。定时任务可能延迟，本阶段未实现独立失活 watchdog。
 
 ## 版本与反馈策略
 

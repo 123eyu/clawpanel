@@ -1587,7 +1587,7 @@ async function runWorkflow(item) {
       assert.deepEqual(workflow.on.push?.branches, ['main'], 'push 仅限 main')
       assert.equal(workflow.on.workflow_dispatch.inputs.runtime_selftest.default, false)
       const selftest = jobs['runtime-selftest']
-      assert.deepEqual(selftest.strategy.matrix.engine, ['openclaw', 'hermes'])
+      assert.deepEqual(selftest.strategy.matrix.engine, ['openclaw', 'hermes', 'opencode', 'deepseek-harness', 'deepseek-harness-preview'])
       assert.match(selftest.if, /github\.event_name == 'workflow_dispatch'.*inputs\.runtime_selftest/)
       assert.match(selftest.if, /github\.ref == 'refs\/heads\/main'/)
       assert.equal(selftest.needs, 'controller-e2e')
