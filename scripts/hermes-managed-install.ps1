@@ -24,7 +24,7 @@ function Read-ClawPanelLegacyInstaller([string]$SourcePath) {
 }
 
 function Get-ClawPanelLegacyDefinitions([string]$Source) {
-    # 只适配固定旧版的三函数五节点；不按字符串搜索替换整个安装器。
+    # 严核固定旧版的三函数五个环境节点；UV 两调用另行验证，不全局替换整个安装器。
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tokens, [ref]$errors)
     if ($errors.Count) { throw 'ClawPanel legacy installer: AST parse failure' }
@@ -75,7 +75,126 @@ function Get-ClawPanelLegacyDefinitions([string]$Source) {
         $definitions += $definition; $total += $edits.Count
     }
     if ($total -ne 5) { throw 'ClawPanel legacy installer: expected exactly five redirections' }
-    return @{ Definitions=$definitions; Redirections=$total }
+    # 固定 vendor 的 Install-Uv 只替换两个原生调用节点；其余分支、日志及失败处理原样保留。
+    $uvFunctions = @($ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]}, $true) | Where-Object { $_.Name -ceq 'Install-Uv' })
+    if ($uvFunctions.Count -ne 1) { throw 'ClawPanel legacy installer: function count Install-Uv' }
+    $uv = $uvFunctions[0]
+    if ($uv.IsFilter -or $uv.IsWorkflow -or $uv.Parameters.Count -or $uv.Body.ParamBlock) { throw 'ClawPanel legacy installer: signature Install-Uv' }
+    $commands = @($uv.Body.FindAll({param($n)
+        $n -is [System.Management.Automation.Language.CommandAst] -and
+        $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Ampersand
+    }, $true))
+    if ($commands.Count -ne 2) { throw 'ClawPanel legacy installer: expected exactly two UV invocations' }
+    $sources = @('https://astral.sh/uv/install.ps1', 'https://github.com/astral-sh/uv/releases/latest/download/uv-installer.ps1')
+    $sourceIds = @('astral','github'); $edits = @()
+    for ($i = 0; $i -lt 2; $i++) {
+        $command = $commands[$i]; $elements = $command.CommandElements
+        if ($elements.Count -ne 5 -or
+            $elements[0] -isnot [System.Management.Automation.Language.VariableExpressionAst] -or $elements[0].VariablePath.UserPath -cne 'psHostExe' -or
+            $elements[1] -isnot [System.Management.Automation.Language.CommandParameterAst] -or $elements[1].ParameterName -cne 'ExecutionPolicy' -or
+            $elements[2] -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or $elements[2].Value -cne 'ByPass' -or
+            $elements[3] -isnot [System.Management.Automation.Language.CommandParameterAst] -or $elements[3].ParameterName -cne 'c' -or
+            $elements[4] -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or $elements[4].Value -cne "irm $($sources[$i]) | iex" -or
+            $command.Redirections.Count -ne 1 -or
+            $command.Redirections[0] -isnot [System.Management.Automation.Language.MergingRedirectionAst] -or
+            $command.Redirections[0].FromStream -ne [System.Management.Automation.Language.RedirectionStream]::Error -or
+            $command.Redirections[0].ToStream -ne [System.Management.Automation.Language.RedirectionStream]::Output) { throw 'ClawPanel legacy installer: UV invocation shape' }
+        $edits += @{Start=($command.Extent.StartOffset - $uv.Extent.StartOffset);Length=($command.Extent.EndOffset - $command.Extent.StartOffset);SourceId=$sourceIds[$i]}
+    }
+    $definition = $uv.Extent.Text
+    foreach ($edit in ($edits | Sort-Object Start -Descending)) {
+        $replacement = 'Invoke-ClawPanelPinnedUvInstaller -HostExe $psHostExe -SourceId ''' + $edit.SourceId + ''' 2>&1'
+        $definition = $definition.Substring(0,$edit.Start) + $replacement + $definition.Substring($edit.Start + $edit.Length)
+    }
+    $definitions += $definition
+    return @{ Definitions=$definitions; Redirections=$total; UvInvocations=$edits.Count }
+}
+
+function Assert-ClawPanelUvPrivatePath([string]$Path) {
+    $root = [IO.Path]::GetFullPath($script:ClawPanelManagedHome).TrimEnd('\','/')
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($full -cne $root -and -not $full.StartsWith($root + '\',[StringComparison]::OrdinalIgnoreCase)) { throw 'ClawPanel pinned UV: path outside managed home' }
+    # 对已存在的每一级父目录也核对，不将 HOME/缓存 junction 当作隔离目录。
+    $current = $full
+    while ($current) {
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'ClawPanel pinned UV: reparse path' }
+        $parent = Split-Path -Path $current -Parent
+        if ($parent -eq $current) { break }
+        $current = $parent
+    }
+    return $full
+}
+
+function Assert-ClawPanelPinnedUvBytes([string]$SourcePath) {
+    $item = Get-Item -LiteralPath $SourcePath -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'ClawPanel pinned UV: non-regular installer' }
+    if ($item.Length -ne 23285) { throw 'ClawPanel pinned UV: size mismatch' }
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try { $hash = ([BitConverter]::ToString($hasher.ComputeHash([IO.File]::ReadAllBytes($item.FullName)))).Replace('-','').ToLowerInvariant() } finally { $hasher.Dispose() }
+    if ($hash -cne 'f6c934a9926096f957615f9f5276efd3caeab58253eec613963a72d12b380e63') { throw 'ClawPanel pinned UV: SHA256 mismatch' }
+}
+
+function Get-ClawPanelPinnedUvInstaller([ValidateSet('astral','github')][string]$SourceId) {
+    # 两个固定官方源对应同一 immutable release 原字节；每处原调用最多下载一次。
+    $urls = @{
+        astral='https://releases.astral.sh/github/uv/releases/download/0.13.1/uv-installer.ps1'
+        github='https://github.com/astral-sh/uv/releases/download/0.13.1/uv-installer.ps1'
+    }
+    $directory = Assert-ClawPanelUvPrivatePath (Join-Path $script:ClawPanelManagedHome '.cache\clawpanel-installers')
+    $null = [IO.Directory]::CreateDirectory($directory)
+    $null = Assert-ClawPanelUvPrivatePath $directory
+    $cache = Assert-ClawPanelUvPrivatePath (Join-Path $directory 'uv-0.13.1-f6c934a9926096f957615f9f5276efd3caeab58253eec613963a72d12b380e63.ps1')
+    if (Test-Path -LiteralPath $cache) {
+        Assert-ClawPanelPinnedUvBytes $cache
+        return $cache
+    }
+    $partial = Assert-ClawPanelUvPrivatePath (Join-Path $directory ([Guid]::NewGuid().ToString('N') + '.partial'))
+    try {
+        $file = [IO.File]::Open($partial,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        $file.Dispose()
+        Invoke-WebRequest -Uri $urls[$SourceId] -OutFile $partial -UseBasicParsing -TimeoutSec 30 -MaximumRedirection 5 -ErrorAction Stop
+        $null = Assert-ClawPanelUvPrivatePath $partial
+        Assert-ClawPanelPinnedUvBytes $partial
+        $null = Assert-ClawPanelUvPrivatePath $cache
+        [IO.File]::Move($partial,$cache)
+        return $cache
+    } finally {
+        if (Test-Path -LiteralPath $partial) {
+            $null = Assert-ClawPanelUvPrivatePath $partial
+            [IO.File]::Delete($partial)
+        }
+    }
+}
+
+function Invoke-ClawPanelPinnedUvInstaller([string]$HostExe, [ValidateSet('astral','github')][string]$SourceId) {
+    $saved = @{}
+    try {
+        $currentHost = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        if (-not [IO.Path]::IsPathRooted($HostExe) -or [IO.Path]::GetFullPath($HostExe) -ine $currentHost) { throw 'ClawPanel pinned UV: unexpected PowerShell host' }
+        $installer = Get-ClawPanelPinnedUvInstaller $SourceId
+        $binaryDirectory = Assert-ClawPanelUvPrivatePath (Join-Path $script:ClawPanelManagedHome 'bin')
+        $configDirectory = Assert-ClawPanelUvPrivatePath (Join-Path $script:ClawPanelManagedHome '.config')
+        # 仅本 worker 进程临时设置，finally 原值恢复；子进程不继承可改下载源/输出位置的覆盖项。
+        $values = @{
+            UV_NO_MODIFY_PATH='1';UV_INSTALL_DIR=$binaryDirectory;XDG_CONFIG_HOME=$configDirectory
+            UV_DOWNLOAD_URL=$null;INSTALLER_DOWNLOAD_URL=$null;UV_INSTALLER_GHE_BASE_URL=$null;UV_INSTALLER_GITHUB_BASE_URL=$null
+            UV_UNMANAGED_INSTALL=$null;CARGO_DIST_FORCE_INSTALL_DIR=$null;GITHUB_PATH=$null
+        }
+        foreach ($name in $values.Keys) {
+            $saved[$name] = [Environment]::GetEnvironmentVariable($name,'Process')
+            [Environment]::SetEnvironmentVariable($name,$values[$name],'Process')
+        }
+        & $HostExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -NoModifyPath
+        $global:LASTEXITCODE = $LASTEXITCODE
+        if ($LASTEXITCODE -ne 0) { Write-Output "ClawPanel pinned UV $SourceId child exited $LASTEXITCODE" }
+    } catch {
+        $global:LASTEXITCODE = 1
+        # 保留原 Install-Uv 两次调用的返回语义：首源错误进入 Tee 日志，再由原分支尝试 mirror。
+        Write-Output "ClawPanel pinned UV $SourceId failed: $_"
+    } finally {
+        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name,$saved[$name],'Process') }
+    }
 }
 
 function Initialize-ClawPanelLegacyEnvironment([string]$HomePath, [string]$BasePath) {
@@ -146,7 +265,7 @@ function Invoke-ClawPanelLegacyInstaller {
     . $InstallerPath @vendorArgs
     foreach ($definition in $adapted.Definitions) { . ([ScriptBlock]::Create($definition)) }
     function Sync-EnvPath { Sync-ClawPanelLegacyPath }
-    [Console]::Error.WriteLine("CLAWPANEL_MANAGED_INSTALL stage=$Stage redirections=5 vendor-sha256=0a80dfeb7434229933bac32e73140d10086dff81bd84b156e71be9abc87cddf2")
+    [Console]::Error.WriteLine("CLAWPANEL_MANAGED_INSTALL stage=$Stage redirections=5 uv-invocations=2 uv-version=0.13.1 vendor-sha256=0a80dfeb7434229933bac32e73140d10086dff81bd84b156e71be9abc87cddf2")
     $def = Get-InstallStage -Name $Stage
     if (-not $def) { throw 'ClawPanel legacy installer: missing official stage' }
     Step-OutOfInstallDir

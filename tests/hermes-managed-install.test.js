@@ -27,6 +27,15 @@ function Set-GitBashEnvVar {
 $candidate = 'private-bash-sink'
 [Environment]::SetEnvironmentVariable("HERMES_GIT_BASH_PATH", $candidate, "User")
 }
+function Install-Uv {
+$psHostExe = Get-PowerShellHostExe
+$astralOut = @(); $ghOut = @()
+& $psHostExe -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex" 2>&1 | Tee-Object -Variable astralOut | Out-Null
+if (-not (Test-Path (Join-Path $HermesHome 'bin/uv.exe'))) {
+& $psHostExe -ExecutionPolicy ByPass -c "irm https://github.com/astral-sh/uv/releases/latest/download/uv-installer.ps1 | iex" 2>&1 | Tee-Object -Variable ghOut | Out-Null
+}
+$astralOut; $ghOut
+}
 `
 
 function runPs(body) {
@@ -208,5 +217,145 @@ foreach($case in @(@('path','f97608f178d1ffeca59860195ab7da295f7c8e5f',2),@('uv'
   assert.equal(r.rejected, 4)
   assert.equal(r.hashRejected, true)
   assert.deepEqual(r.cli.map(x => x.exit), [2, 1, 1])
+  t.diagnostic(JSON.stringify(r))
+})
+
+test('固定 UV 版本/hash 和 NoProfile 子进程入口在共享 wrapper 内，不保留浮动执行', () => {
+  const ps = fs.readFileSync(wrapper, 'utf8')
+  assert.match(ps, /function Get-ClawPanelPinnedUvInstaller/)
+  assert.match(ps, /f6c934a9926096f957615f9f5276efd3caeab58253eec613963a72d12b380e63/)
+  assert.match(ps, /https:\/\/releases\.astral\.sh\/github\/uv\/releases\/download\/0\.13\.1\/uv-installer\.ps1/)
+  assert.match(ps, /https:\/\/github\.com\/astral-sh\/uv\/releases\/download\/0\.13\.1\/uv-installer\.ps1/)
+  assert.match(ps, /-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \$installer -NoModifyPath/)
+})
+
+test('PS5 两处 UV AST 精确适配；host、flags、URL、重定向、签名和数量漂移均拒绝', { skip: process.platform !== 'win32' }, t => {
+  const r = runPs(`
+$source=[IO.File]::ReadAllText($fixturePath)
+$r=Get-ClawPanelLegacyDefinitions $source
+if($r.Redirections -ne 5 -or $r.UvInvocations -ne 2 -or $r.Definitions.Count -ne 4){throw 'missing narrow uv adaptation'}
+$uv=$r.Definitions[-1]
+if($uv -match 'irm |iex|latest/download|& \\$psHostExe'){throw 'floating invocation left executable'}
+if(([regex]::Matches($uv,'Invoke-ClawPanelPinnedUvInstaller')).Count -ne 2){throw 'missing two invocations'}
+$badSources=@(
+  $source.Replace('function Install-Uv {','function Install-Uv {param($extra)'),
+  $source.Replace('$psHostExe -ExecutionPolicy','$otherHost -ExecutionPolicy'),
+  $source.Replace('-ExecutionPolicy ByPass -c','-ExecutionPolicy RemoteSigned -c'),
+  $source.Replace('https://astral.sh/uv/install.ps1','https://untrusted.invalid/install.ps1'),
+  $source.Replace('2>&1 | Tee-Object','3>&1 | Tee-Object'),
+  $source.Replace('function Install-Uv {','function Different-Uv {'),
+  ($source + '\nfunction Install-Uv {}'),
+  $source.Replace('& $psHostExe -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex" 2>&1','Write-Output first-removed'),
+  $source.Replace('$astralOut = @();','$astralOut = @(); & $psHostExe -c "extra";')
+)
+$rejected=0
+foreach($s in $badSources){try{$null=Get-ClawPanelLegacyDefinitions $s}catch{$rejected++}}
+if($rejected -ne $badSources.Count){throw "UV negative accepted: $rejected"}
+@{redirections=$r.Redirections;uvInvocations=$r.UvInvocations;negativeRejected=$rejected;kind='PS5-AST-no-install'}|ConvertTo-Json -Compress
+`)
+  assert.equal(r.uvInvocations, 2)
+  assert.equal(r.negativeRejected, 9)
+  t.diagnostic(JSON.stringify(r))
+})
+
+test('PS5 假下载坏字节/缓存篡改均不执行，原两源分支有界保留下载错误', { skip: process.platform !== 'win32' }, t => {
+  const r = runPs(`
+$privateHome=Join-Path $temp 'private home'
+$null=New-Item -ItemType Directory -Force $privateHome
+Initialize-ClawPanelLegacyEnvironment $privateHome $env:Path
+$script:requests=New-Object 'System.Collections.Generic.List[object]'
+function Invoke-WebRequest {
+  param($Uri,$OutFile,$TimeoutSec,$MaximumRedirection,[switch]$UseBasicParsing,$ErrorAction)
+  $script:requests.Add(@{uri=$Uri;timeout=$TimeoutSec;redirects=$MaximumRedirection;out=$OutFile})
+  if($Uri -like 'https://releases.astral.sh/*'){throw 'fixture-primary-network-blocked'}
+  [IO.File]::WriteAllText($OutFile,'throw "download-must-never-execute"')
+}
+function Get-PowerShellHostExe { return "$PSHOME/powershell.exe" }
+$HermesHome=$privateHome
+$r=Get-ClawPanelLegacyDefinitions ([IO.File]::ReadAllText($fixturePath))
+. ([ScriptBlock]::Create($r.Definitions[-1]))
+$all=@(Install-Uv)
+if($script:requests.Count -ne 2){throw "not exactly original bounded two sources: $($script:requests.Count)"}
+if(($all -join '|') -notmatch 'fixture-primary-network-blocked' -or ($all -join '|') -notmatch 'SHA256|size'){throw 'lost original download/hash errors'}
+foreach($request in $script:requests){
+  if($request.timeout -ne 30 -or $request.redirects -ne 5 -or -not $request.out.StartsWith($privateHome + '\\')){throw 'unbounded/outside download'}
+}
+$cache=Join-Path $privateHome '.cache/clawpanel-installers/uv-0.13.1-f6c934a9926096f957615f9f5276efd3caeab58253eec613963a72d12b380e63.ps1'
+[IO.File]::WriteAllText($cache,'corrupt cache')
+$before=$script:requests.Count
+$rejected=$false
+try{$null=Get-ClawPanelPinnedUvInstaller 'github'}catch{$rejected=$true}
+if(-not $rejected -or $script:requests.Count -ne $before){throw 'tampered cache silently reused or repaired'}
+$wrongHash=Join-Path $privateHome 'same-size-wrong-hash.ps1'
+[IO.File]::WriteAllBytes($wrongHash,(New-Object byte[] 23285))
+$hashRejected=$false
+try{Assert-ClawPanelPinnedUvBytes $wrongHash}catch{if("$_" -match 'SHA256 mismatch'){$hashRejected=$true}}
+if(-not $hashRejected){throw 'equal-size corrupt bytes accepted'}
+if(@(Get-ChildItem -LiteralPath (Split-Path $cache -Parent) -Filter '*.partial').Count){throw 'download partial leaked'}
+@{requests=@($script:requests.ToArray());errors=$all;cacheRejected=$rejected;hashRejected=$hashRejected;kind='fake-download-no-UV-execution'}|ConvertTo-Json -Depth 5 -Compress
+`)
+  assert.equal(r.requests.length, 2)
+  assert.equal(r.cacheRejected, true)
+  assert.equal(r.hashRejected, true)
+  t.diagnostic(JSON.stringify(r))
+})
+
+test('PS5 缓存拒绝 HOME 外路径、junction 及目录冒充文件，未下载也未执行', { skip: process.platform !== 'win32' }, t => {
+  const r = runPs(`
+$privateHome=Join-Path $temp 'private home'
+$outside=Join-Path $temp 'outside private home'
+$null=New-Item -ItemType Directory -Force $privateHome,$outside
+Initialize-ClawPanelLegacyEnvironment $privateHome $env:Path
+$script:requests=0
+function Invoke-WebRequest {throw 'must not download on invalid path'}
+$rejected=0
+try{$null=Assert-ClawPanelUvPrivatePath (Join-Path $outside 'file.ps1')}catch{$rejected++}
+$null=New-Item -ItemType Junction -Path (Join-Path $privateHome '.cache') -Target $outside
+try{$null=Get-ClawPanelPinnedUvInstaller 'astral'}catch{if("$_" -match 'reparse path'){$rejected++}}
+try{Assert-ClawPanelPinnedUvBytes $outside}catch{if("$_" -match 'non-regular installer'){$rejected++}}
+if($rejected -ne 3 -or @(Get-ChildItem -LiteralPath $outside).Count){throw 'private path boundary failed'}
+@{rejected=$rejected;kind='owned-temp-junction-no-install'}|ConvertTo-Json -Compress
+`)
+  assert.equal(r.rejected, 3)
+  t.diagnostic(JSON.stringify(r))
+})
+
+test('PS5 真子进程 sink 验证 NoProfile/NonInteractive/私有 env、退出码和进程环境恢复', { skip: process.platform !== 'win32' }, t => {
+  const r = runPs(`
+$privateHome=Join-Path $temp 'private home'
+$null=New-Item -ItemType Directory -Force $privateHome
+Initialize-ClawPanelLegacyEnvironment $privateHome $env:Path
+$sink=Join-Path $temp 'harmless uv argv sink.ps1'
+[IO.File]::WriteAllText($sink, @'
+param([switch]$NoModifyPath)
+@{pid=$PID;argv=[Environment]::GetCommandLineArgs();noModify=[bool]$NoModifyPath;flag=$env:UV_NO_MODIFY_PATH;install=$env:UV_INSTALL_DIR;config=$env:XDG_CONFIG_HOME;download=$env:UV_DOWNLOAD_URL;unmanaged=$env:UV_UNMANAGED_INSTALL;ci=$env:GITHUB_PATH}|ConvertTo-Json -Compress
+exit 7
+'@)
+# 只替换本次测试进程的已校验下载边界；实际固定哈希函数另有坏字节及真实只读原字节验收。
+function Get-ClawPanelPinnedUvInstaller {param($SourceId) return $sink}
+$env:UV_DOWNLOAD_URL='https://fixture.invalid/floating'
+$env:UV_UNMANAGED_INSTALL='outside-fixture'
+$env:GITHUB_PATH='outside-ci-file'
+$before=[Environment]::GetEnvironmentVariables('Process')|ConvertTo-Json -Compress
+$output=@(Invoke-ClawPanelPinnedUvInstaller -HostExe "$PSHOME/powershell.exe" -SourceId 'astral')
+$code=$LASTEXITCODE
+$after=[Environment]::GetEnvironmentVariables('Process')|ConvertTo-Json -Compress
+if($before -cne $after){throw 'wrapper process env not restored'}
+$child=$output|Where-Object {$_ -is [string] -and $_.StartsWith('{')}|Select-Object -First 1|ConvertFrom-Json
+if(-not $child -or $child.pid -eq $PID -or $code -ne 7){throw 'sink/exit masked'}
+if($child.argv -notcontains '-NoProfile' -or $child.argv -notcontains '-NonInteractive' -or $child.argv -notcontains '-File' -or $child.argv -contains '-c'){throw 'unsafe argv'}
+if(-not $child.noModify -or $child.flag -ne '1' -or $child.install -ne (Join-Path $privateHome 'bin') -or $child.config -ne (Join-Path $privateHome '.config')){throw 'private env'}
+if($child.download -or $child.unmanaged -or $child.ci){throw 'inherited redirect env'}
+$outside=Join-Path $temp 'outside bin'
+$null=New-Item -ItemType Directory -Force $outside
+$null=New-Item -ItemType Junction -Path (Join-Path $privateHome 'bin') -Target $outside
+$blocked=@(Invoke-ClawPanelPinnedUvInstaller -HostExe "$PSHOME/powershell.exe" -SourceId 'astral')
+if($LASTEXITCODE -ne 1 -or ($blocked -join '|') -notmatch 'reparse path' -or ($blocked -join '|') -match '"pid"'){throw 'private binary output junction reached child'}
+if($before -cne ([Environment]::GetEnvironmentVariables('Process')|ConvertTo-Json -Compress)){throw 'blocked env not restored'}
+@{pid=$PID;child=$child;exit=$code;envRestored=$true;outputJunctionBlocked=$true;kind='actual-PS5-harmless-child-not-install'}|ConvertTo-Json -Depth 5 -Compress
+`)
+  assert.equal(r.exit, 7)
+  assert.equal(r.envRestored, true)
+  assert.equal(r.outputJunctionBlocked, true)
   t.diagnostic(JSON.stringify(r))
 })
