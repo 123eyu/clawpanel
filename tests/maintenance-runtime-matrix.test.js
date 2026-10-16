@@ -26,7 +26,8 @@ test('parent 请求容器验收时，所有引擎均先核验真实隔离事实�
   const stage = source.split("await stage('isolation'")[1]?.split("await stage('web'")[0] || ''
   // 先检查门禁存在；红灯阶段不得让负向测试误启动宿主安装。
   assert.match(stage, /if \(process\.env\.MAINTENANCE_ISOLATED_RUNTIME === '1'\) requireInstallContainer\(\)/)
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'clawpanel-runtime-guard-'))
+  // macOS 的 /var 临时目录是链接；使用物理目录，不放宽验收器的祖先链接门禁。
+  const temp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'clawpanel-runtime-guard-'))
   try {
     for (const engine of ['pi', 'openclaw', 'hermes', 'opencode', 'deepseek-harness', 'deepseek-harness-preview']) {
       await t.test(engine, () => {
@@ -36,6 +37,7 @@ test('parent 请求容器验收时，所有引擎均先核验真实隔离事实�
           encoding: 'utf8', timeout: 30000, windowsHide: true,
         })
         assert.equal(run.status, 1, run.stdout + run.stderr)
+        assert.ok(fs.existsSync(path.join(output, 'report.json')), run.stdout + run.stderr)
         const report = JSON.parse(fs.readFileSync(path.join(output, 'report.json'), 'utf8'))
         assert.equal(report.environment.installContainerProof.noDockerSocket, false)
         assert.equal(report.cases.find(c => c.name === 'isolation').status, 'missing')
