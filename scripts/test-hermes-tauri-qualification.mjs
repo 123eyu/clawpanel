@@ -8,6 +8,9 @@ import net from 'node:net'
 import crypto from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { qualifyHermesProfiles, assertScheduledTasksStable } from './hermes-qualification-profiles.mjs'
+import { qualifyHermesProfileCollision, taskNamePythonSource } from './hermes-qualification-profile-collision.mjs'
+import { validatePrivateCompletion, validateRunnerProof } from './test-hermes-windows-qualification.mjs'
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
@@ -19,6 +22,105 @@ const COMPATIBILITY_MODE = 'new-app-old-runtime-native'
 const COMPATIBILITY_STATUS = 'passed-native-old-runtime-compatibility'
 const installerCommand = cmd => ['install_hermes', 'update_hermes', 'uninstall_hermes'].includes(cmd)
 const nativePath = p => path.win32.isAbsolute(p) ? path.win32.resolve(p).toLowerCase() : path.resolve(p)
+const TOOLING_FILES = ['scripts/test-hermes-tauri-qualification.mjs', 'scripts/test-hermes-windows-qualification.mjs', 'scripts/hermes-qualification-provider.mjs', 'scripts/hermes-qualification-profiles.mjs', 'scripts/hermes-qualification-profile-collision.mjs']
+const sha256 = value => crypto.createHash('sha256').update(value).digest('hex')
+const validHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
+const runtimePin = version => { const pin = [OLD_RUNTIME, NEW_APP_PIN].find(p => p.version === version); assert.ok(pin, '未知 profile runtime pin'); return pin }
+
+export function readNativeToolingSnapshot({ root, sha }) {
+  const git = args => { const r = spawnSync('git', ['--no-optional-locks', '-C', root, ...args], { windowsHide: true, timeout: 30000, maxBuffer: 16 * 1024 * 1024 }); assert.equal(r.status, 0, 'tooling Git 读取失败'); return r.stdout }
+  assert.match(sha || '', /^[a-f0-9]{40}$/); assert.equal(git(['rev-parse', 'HEAD']).toString().trim(), sha, 'tooling HEAD不是当前main工作流SHA')
+  const files = {}
+  for (const file of TOOLING_FILES) {
+    const p = physical(path.join(root, file)); assert.ok(fs.statSync(p).isFile())
+    const entry = git(['ls-tree', sha, '--', file]).toString().trim().match(/^100(?:644|755) blob ([a-f0-9]{40})\t/)
+    assert.ok(entry, `tooling 文件未绑定Git blob ${file}`)
+    const bytes = git(['show', `${sha}:${file}`])
+    assert.equal(crypto.createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'), entry[1])
+    assert.equal(hash(p), sha256(bytes), `tooling 字节漂移 ${file}`); files[file] = { gitBlob: entry[1], sha256: sha256(bytes) }
+  }
+  return { sha, files }
+}
+
+function assertNativeTooling(r) {
+  assert.equal(r.executionMode, 'actual-github-hosted-windows-vm-native', '非真实 native mode')
+  validateRunnerProof(r.runner)
+  const t = r.tooling; assert.equal(t?.scope, 'github-hosted-main-native-tooling'); assert.equal(t.sha, r.runner.toolingSha); assert.equal(t.sha, r.runner.workflowSha)
+  for (const s of [t.before, t.after]) {
+    assert.equal(s?.sha, t.sha); assert.deepEqual(Object.keys(s.files).sort(), [...TOOLING_FILES].sort())
+    for (const value of Object.values(s.files)) { assert.ok(validHash(value.sha256)); assert.match(value.gitBlob || '', /^[a-f0-9]{40}$/) }
+  }
+  assert.deepEqual(t.after, t.before, '五个 native tooling helper pre/post 漂移')
+  assert.equal(r.profileQualificationModuleSha256, t.before.files[TOOLING_FILES[3]].sha256)
+  assert.equal(r.profileCollisionModuleSha256, t.before.files[TOOLING_FILES[4]].sha256)
+}
+
+function assertArtifactBinding(r, value, kind) {
+  const b = value?.nativeBinding, pin = runtimePin(r.expectedVersion)
+  assert.equal(b?.scope, 'actual-native-profile-artifact'); assert.equal(b.kind, kind); assert.equal(b.toolingSha, r.tooling.sha)
+  assert.equal(b.sourceCommit, pin.commit); assert.equal(b.version, pin.version); assert.equal(nativePath(b.home), nativePath(r.runtimeHome))
+  assert.deepEqual(b.moduleHashes, Object.fromEntries(TOOLING_FILES.map(f => [f, r.tooling.before.files[f].sha256])))
+  assert.equal(b.reportFile, kind === 'named-profile' ? 'profile-qualification.json' : 'profile-collision.json')
+  assert.ok(validHash(b.reportSha256) && validHash(b.envelopeSha256)); assert.equal(b.envelopeFile, 'native-bound.json')
+  assert.ok(kind === 'collision' ? b.directory === 'profile-collision' : ['named-profile-ui-default', 'named-profile-no-skills'].includes(b.directory), 'artifact目录缺失/越界')
+}
+
+export function assertNativeNamedProfiles(r) {
+  const pin = runtimePin(r.expectedVersion), source = r.profileRuntimeSource
+  assert.ok(source && source.version === pin.version && source.commit === pin.commit && source.headBefore === pin.commit && source.headAfter === pin.commit, 'named profile source pin漂移')
+  assert.ok(Array.isArray(r.namedProfiles) && r.namedProfiles.length && r.namedProfiles.some(p => p.cloneFromDefault === true && p.noSkills === false), '缺原UI默认true/false named profile实测')
+  const last = r.rounds.at(-1), names = new Set()
+  for (const p of r.namedProfiles) {
+    assert.equal(p.schemaVersion, 1); assert.equal(p.status, 'passed'); assert.equal(p.evidenceKind, 'production-ipc-native-gui', 'fixture不能补named资格')
+    assert.equal(p.version, pin.version); assert.equal(p.expectedCommit, pin.commit); assert.equal(p.defaultSessionId, last.sessionId)
+    assert.equal(p.provider, 'custom'); assert.equal(p.model, last.prompts.at(-1).model); assert.deepEqual(p.modelReadback, { provider: p.provider, model: p.model })
+    assert.equal(p.cloneFromDefault, true); assert.equal(typeof p.noSkills, 'boolean')
+    assert.match(p.name || '', /^qualp-[a-f0-9]{12}$/); assert.ok(!names.has(p.name)); names.add(p.name); assert.equal(p.renamed, p.name + '-renamed')
+    assert.deepEqual(p.steps, ['baseline-history-and-task-definitions', 'dashboard-proxy-create-and-model-readback', 'default-to-named-gui-runtime-and-boot', 'stop-named-restore-default', 'gui-rename-delete-and-physical-readback'])
+    assert.deepEqual(p.errors, []); assert.deepEqual(p.gaps, [])
+    assertNativeListeners(p.namedListeners, { home: r.runtimeHome, ports: [r.gatewayPort] }); assertNativeListeners(p.defaultListeners, { home: r.runtimeHome, ports: [r.gatewayPort] })
+    assert.equal(p.namedRuntime?.profile, p.name); assert.equal(p.namedRuntime.file.replaceAll('\\', '/'), `profiles/${p.name}/gateway_state.json`); assert.ok(validHash(p.namedRuntime.sha256)); assert.ok(p.namedListeners.some(x => x.pid === p.namedRuntime.pid))
+    if (p.namedRuntime.hermesHome) assert.equal(nativePath(p.namedRuntime.hermesHome), nativePath(path.join(r.runtimeHome, '.hermes/profiles', p.name)))
+    if (pin.version === '0.22.2') { assert.equal(p.boot?.applicable, true); assert.equal(p.boot.identity, pin.commit); assert.ok(validHash(p.boot.sha256)); assert.ok(Array.isArray(p.boot.steps) && p.boot.steps.length && p.boot.steps.every(s => typeof s === 'string' && s)); assert.ok(Number.isFinite(Date.parse(p.boot.bootstrappedAt))); assert.match(p.boot.file.replaceAll('\\', '/'), new RegExp(`^installs/[a-f0-9]{16}/bootstrap/${p.name}\\.json$`)); assert.ok(Array.isArray(p.namedRuntime.servedProfiles) && p.namedRuntime.servedProfiles.includes(p.name)) }
+    else { assert.deepEqual(p.boot, { applicable: false, reason: 'legacy-no-PM-boot-record-contract' }); assert.ok(!Object.hasOwn(p.namedRuntime, 'servedProfiles'), '旧runtime不伪造served_profiles') }
+    assert.ok(validHash(p.historyBefore?.sha256) && p.historyBefore.messages > 0); assert.deepEqual(p.historyAfter, p.historyBefore)
+    assertScheduledTasksStable(p.tasks?.before, p.tasks?.after)
+    assert.equal(p.guiReceipts?.length, 2); const [rename, del] = p.guiReceipts
+    assert.ok(rename.method === 'PATCH' && rename.path === `/api/profiles/${p.name}` && rename.ok === true && rename.name === p.renamed)
+    assert.ok(del.method === 'DELETE' && del.path === `/api/profiles/${p.renamed}` && del.ok === true && del.identity_settled !== false && del.settlement_pending !== true)
+    assert.deepEqual(p.screenshots?.map(s => s.file), ['named-visible.png', 'named-active.png', 'restored-default.png', 'before-rename.png', 'renamed-visible.png', 'deleted.png']); assert.ok(p.screenshots.every(s => validHash(s.sha256)))
+    assertArtifactBinding(r, p, 'named-profile')
+  }
+  assertNativeStopped(r.namedProfileStopProof)
+  for (const p of r.namedProfiles.flatMap(p => [...p.namedListeners, ...p.defaultListeners])) assert.ok(r.namedProfileStopProof.identities.some(s => identityKey(s) === identityKey(p)), 'named STOP漏监听身份')
+}
+
+export function assertNativeProfileCollision(r) {
+  const p = r.profileCollision, pin = runtimePin(r.expectedVersion)
+  assert.equal(p?.status, 'passed-windows-profile-collision'); assert.equal(p.evidenceKind, 'real-windows-vm-native-modal'); assert.equal(p.version, pin.version)
+  assert.equal(p.runId, r.runner.runId); assert.equal(p.attempt, r.runner.attempt); assert.match(p.nonce || '', /^[a-f0-9]{24}$/)
+  assert.equal(p.marker, `ClawPanel profile collision ${p.runId}/${p.attempt}/${p.nonce}`); assert.equal(p.source?.sourceCommit, pin.commit)
+  const files = ['hermes_constants.py', 'hermes_cli/gateway.py', 'hermes_cli/gateway_windows.py', 'hermes_cli/profiles.py', ...(pin.version === '0.22.2' ? ['hermes_cli/profiles_service_cleanup.py'] : [])]
+  assert.deepEqual(Object.keys(p.source.sourceHashes).sort(), files.sort()); assert.ok(Object.values(p.source.sourceHashes).every(validHash))
+  assert.deepEqual(p.errors, []); assert.deepEqual(p.gaps, []); assert.deepEqual(p.cases?.map(c => c.operation), ['rename', 'delete'])
+  assert.equal(r.profileCollisionDerivations?.length, 2)
+  for (const [i, c] of p.cases.entries()) {
+    assert.equal(c.stage, 'complete'); assert.equal(c.name, `qualc-${p.nonce}-${c.operation}`); assert.equal(c.renamed, c.name + '-renamed')
+    assert.deepEqual(c.priorTask, { state: 'missing', hresult: '0x80070002' }); assert.equal(c.executionCount, 0); assert.equal(c.sentinelRemoved, true); assert.equal(c.normalCrudPassed, true); assert.ok(c.executionProof && c.normalCrudLayer)
+    const t = c.taskBefore; assert.equal(t?.state, 'exists'); assert.equal(t.name, c.sentinel.name); assert.equal(t.marker, p.marker); assert.equal(c.sentinel.marker, p.marker); assert.equal(c.sentinel.sid, r.runner.sid); assert.ok(validHash(t.sha256)); assert.equal(t.userId, r.runner.sid); assert.notEqual(t.userId, 'S-1-5-18'); assert.equal(t.enabled, false); assert.equal(t.triggers, 0); assert.equal(t.actions, 1); assert.equal(t.allowDemandStart, false); assert.equal(t.runLevel, 0); assert.equal(t.logonType, 3); assert.equal(t.lastTaskResult, 0x41303); assert.ok(t.lastRunTime); assert.equal(t.action, c.sentinel.script); assert.deepEqual(c.taskAfter, t)
+    assert.equal(c.derivation.method, 'original-get_task_name'); assert.equal(c.derivation.taskName, t.name); assert.equal(c.derivation.sourceCommit, pin.commit)
+    assert.equal(nativePath(c.derivation.profileHome), nativePath(path.join(r.runtimeHome, '.hermes/profiles', c.name)))
+    assert.equal(c.receipts?.length, 1); assert.equal(c.receipts[0].method, i === 0 ? 'PATCH' : 'DELETE'); assert.equal(c.receipts[0].path, '/api/profiles/' + c.name)
+    if (pin.version === '0.22.2') { assert.equal(c.collisionDisposition, 'policy-rejected-before-profile-mutation'); assert.ok(c.receipts[0].error?.includes(t.name) && c.receipts[0].error.includes('private profile mutation blocked by external Windows task/query')); assert.ok(c.visibleError?.includes(t.name)); assert.deepEqual(c.historyAfter, c.historyBefore) }
+    else { assert.equal(c.collisionDisposition, 'old21-profile-mutation-succeeded-task-retained'); assert.equal(c.receipts[0].ok, true) }
+    const d = r.profileCollisionDerivations[i]; assert.equal(d.evidenceKind, 'actual-private-runtime-python'); assert.equal(d.profile, c.name); assert.equal(d.taskName, t.name); assert.equal(d.sourceCommit, pin.commit); assert.equal(nativePath(d.home), nativePath(r.runtimeHome)); assert.equal(nativePath(d.profileHome), nativePath(c.derivation.profileHome)); assert.equal(nativePath(d.python), nativePath(c.derivation.python)); assert.ok(privateProcess({ executablePath: d.python }, r.runtimeHome)); assert.equal(nativePath(d.sourceFile), nativePath(path.join(r.runtimeHome, '.hermes/hermes-agent/hermes_cli/gateway_windows.py'))); assert.equal(d.exitCode, 0); assert.ok([d.commandSha256, d.stdoutSha256, d.stderrSha256].every(validHash)); assert.equal(d.role, pin.version === '0.22.2' ? 'pm-launch-get-task-name' : 'legacy-private-venv-get-task-name'); assert.ok(privateProcess({ executablePath: d.program }, r.runtimeHome))
+    assert.ok([d.programSha256, d.pythonSha256, d.sourceFileSha256].every(validHash)); assert.equal(d.sourceFileSha256, p.source.sourceHashes['hermes_cli/gateway_windows.py'])
+    if (pin.version === '0.21.5') assert.equal(nativePath(d.program), nativePath(path.join(r.runtimeHome, '.hermes/hermes-agent/venv/Scripts/python.exe')))
+    else assert.ok(nativePath(d.program).startsWith(nativePath(path.join(r.runtimeHome, '.hermes/installs')) + '\\') && nativePath(d.python).startsWith(nativePath(path.join(r.runtimeHome, '.hermes/tools')) + '\\') && nativePath(d.program) !== nativePath(d.python))
+  }
+  assert.deepEqual(p.screenshots?.map(s => s.file), ['rename-collision.png', 'delete-collision.png']); assert.ok(p.screenshots.every(s => validHash(s.sha256)))
+  assertArtifactBinding(r, p, 'collision')
+}
 export const NATIVE_STEPS = [
   'native-window-rust-ipc-gateway-online', 'actual-native-send-button-complete-reply',
   'native-refresh-restores-real-history', 'native-sustained-210s-42-health',
@@ -143,6 +245,7 @@ export async function runNativeCleanup(steps) {
 }
 
 function assertNativeUiComplete(r) {
+  assertNativeTooling(r)
   assertNativePage(r.nativePage)
   assert.ok(r.completed && r.hostUnchanged && r.nativeProcessesExited && r.driverPortsClosed)
   assert.ok(!r.error && !r.cleanupError && !r.hostOrSourceError && !r.providerError)
@@ -163,7 +266,9 @@ function assertNativeUiComplete(r) {
   }
   assertNativeStopped(r.cleanup)
   assertNativeStopped(r.cleanup.final)
-  for (const proof of [...r.rounds.flatMap(x => x.stopProofs), r.cleanup]) {
+  assertNativeNamedProfiles(r)
+  assertNativeProfileCollision(r)
+  for (const proof of [...r.rounds.flatMap(x => x.stopProofs), r.namedProfileStopProof, r.cleanup]) {
     assert.ok(proof.identities.every(p => r.cleanup.final.identities.some(last => identityKey(last) === identityKey(p))), '最终清理漏掉已观察 runtime 身份')
     assert.ok(proof.ports.every(port => r.cleanup.final.ports.includes(port)), '最终清理漏掉已观察 runtime 端口')
   }
@@ -351,6 +456,36 @@ function physical(file) {
   return absolute
 }
 
+export function buildNativeTaskNameCommand({ root, home, profileHome, release, completion }) {
+  const pin = runtimePin(release.version); assert.equal(release.commit, pin.commit)
+  home = physical(home); const source = physical(path.join(home, '.hermes/hermes-agent')), ownerHome = physical(path.join(home, '.hermes'))
+  profileHome = physical(profileHome)
+  assert.equal(nativePath(path.dirname(profileHome)), nativePath(path.join(ownerHome, 'profiles')), '派生profile不是owner HOME直接子目录')
+  assert.match(path.basename(profileHome), /^qualc-[a-z0-9-]+$/); assert.ok(fs.statSync(profileHome).isDirectory())
+  validatePrivateCompletion(completion, { home, ...pin })
+  for (const f of [completion.python, ...Object.values(completion.modules)]) { physical(f); assert.ok(inside(home, fs.realpathSync(f)), 'privatecompletion实际路径越界') }
+  // 固定内部命名snippet；不接收HTTP code、调用方任意Python或外部程序名。
+  const original = taskNamePythonSource(profileHome)
+  const code = `import sys,json,io,contextlib\nsys.stdout.reconfigure(encoding='utf-8')\n_capture=io.StringIO()\nwith contextlib.redirect_stdout(_capture):\n exec(${JSON.stringify(original)},{'__name__':'__main__'})\nfrom hermes_cli.gateway_windows import get_task_name as _naming\n_value=json.loads(_capture.getvalue())\n_value.update(python=sys.executable,sourceFile=_naming.__code__.co_filename)\nprint(json.dumps(_value))\n`
+  let program, args, role, helperSha256
+  if (pin.version === '0.22.2') {
+    const helperFile = physical(path.join(root, 'scripts/hermes-pm-runtime.js')), helper = fs.readFileSync(helperFile, 'utf8')
+    helperSha256 = hash(helperFile); assert.equal(helperSha256, completion.pm.helperSha256, 'LAUNCH helper不是实际安装验证字节')
+    const originalScript = name => { const value = helper.match(new RegExp('export const ' + name + ' = String.raw`([\\s\\S]*?)\\n`'))?.[1]; assert.ok(value?.includes(pin.commit), `固定PM helper缺失 ${name}`); return value }
+    const launch = originalScript('HERMES_PRIVATE_LAUNCH_SCRIPT'), metadata = originalScript('HERMES_PRIVATE_METADATA_SCRIPT')
+    assert.deepEqual(completion.commandSpec.args, ['-I', '-B', '-c', metadata, source, pin.commit], '已装metadata commandSpec被改写/任意code')
+    assert.equal(nativePath(completion.commandSpec.actualSelectedInterpreter), nativePath(completion.python))
+    program = physical(completion.commandSpec.program); assert.equal(nativePath(program), nativePath(completion.pm.dependencyPython)); assert.ok(inside(home, fs.realpathSync(program)))
+    args = ['-I', '-B', '-c', launch, source, ownerHome, pin.commit, '--python-json', code]; role = 'pm-launch-get-task-name'
+  } else {
+    program = physical(path.join(source, 'venv/Scripts/python.exe')); const cli = physical(path.join(source, 'venv/Scripts/hermes.exe'))
+    assert.equal(nativePath(completion.python), nativePath(program)); assert.equal(nativePath(completion.cli), nativePath(cli))
+    assert.deepEqual(completion.commandSpec, { program: cli, args: ['--version'], role: 'legacy-managed-hermes-cli' }, '旧venv commandSpec被改写')
+    args = ['-I', '-B', '-c', `import sys\nsys.path.insert(0,${JSON.stringify(source)})\n` + code]; role = 'legacy-private-venv-get-task-name'
+  }
+  assert.ok(fs.statSync(program).isFile()); return { program, args, role, source, ownerHome, profileHome, expectedPython: completion.python, expectedSourceFile: path.join(source, 'hermes_cli/gateway_windows.py'), sourceCommit: pin.commit, ...(helperSha256 ? { helperSha256 } : {}) }
+}
+
 async function execute(o) {
   // 第一项是既有可信 VM/账户实证，传入路径或环境变量不构成本机安装授权。
   const qualification = await import('./test-hermes-windows-qualification.mjs')
@@ -364,11 +499,16 @@ async function execute(o) {
   const compatibility = !!o['--seed-sha']
   assert.equal(prior.candidateSha, compatibility ? o['--seed-sha'] : o['--sha'])
   const home = physical(path.join(webOutput, 'h')), app = physical(o['--application'])
+  const release = read(path.join(webOutput, 'release.json')), completion = read(path.join(webOutput, 'privatecompletion.json'))
+  assert.deepEqual({ version: release.version, commit: release.commit }, runtimePin(o['--version']))
+  qualification.validatePrivateCompletion(completion, { home, version: release.version, commit: release.commit })
   assert.ok(fs.statSync(home).isDirectory() && inside(root, app) && /clawpanel\.exe$/i.test(app), '应用或安装 HOME 越界')
   const git = spawnSync('git', ['--no-optional-locks', '-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true })
   assert.equal(git.status, 0); assert.equal(git.stdout.trim(), o['--sha'])
   fs.mkdirSync(output)
-  const report = { schemaVersion: 1, status: 'failed', candidateSha: o['--sha'], expectedVersion: o['--version'], runtimeHome: home, startedAt: new Date().toISOString(), scope: 'actual ClawPanel.exe / WebView2 / Rust IPC / W3C native driver', runner: proof, webQualification: { path: webOutput, sha256: hash(path.join(webOutput, 'report.json')) }, application: { path: app, sha256: hash(app) }, rounds: [], ipc: [], provider: [], nativePage: null, cleanup: null, errorObservationScope: 'observed flows only after error listener installation; excludes pre-attachment startup and every refresh until listeners are reinstalled; not a whole-lifecycle zero-error claim' }
+  const toolingRoot = physical(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'))
+  const toolingBefore = readNativeToolingSnapshot({ root: toolingRoot, sha: proof.toolingSha })
+  const report = { schemaVersion: 1, status: 'failed', candidateSha: o['--sha'], expectedVersion: o['--version'], runtimeHome: home, startedAt: new Date().toISOString(), executionMode: 'actual-github-hosted-windows-vm-native', tooling: { sha: proof.toolingSha, scope: 'github-hosted-main-native-tooling', before: toolingBefore, after: null }, profileQualificationModuleSha256: toolingBefore.files[TOOLING_FILES[3]].sha256, profileCollisionModuleSha256: toolingBefore.files[TOOLING_FILES[4]].sha256, scope: 'actual ClawPanel.exe / WebView2 / Rust IPC / W3C native driver', runner: proof, webQualification: { path: webOutput, sha256: hash(path.join(webOutput, 'report.json')) }, application: { path: app, sha256: hash(app) }, rounds: [], ipc: [], provider: [], nativePage: null, cleanup: null, errorObservationScope: 'observed flows only after error listener installation; excludes pre-attachment startup and every refresh until listeners are reinstalled; not a whole-lifecycle zero-error claim' }
   const save = () => fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2))
   if (compatibility) {
     assert.equal(o['--version'], OLD_RUNTIME.version)
@@ -385,6 +525,7 @@ async function execute(o) {
   const before = qualification.hostSnapshot(proof)
   fs.writeFileSync(path.join(output, 'host-before.json'), JSON.stringify(before, null, 2))
   const env = qualification.isolationEnv({ home, temp: path.join(output, 'tmp'), realProfile: proof.actualProfile })
+  const psChildEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'))
   env.WEBVIEW2_USER_DATA_FOLDER = path.join(home, '.webview2-native-qualification')
   env.TAURI_WEBVIEW_AUTOMATION = '1'
   fs.mkdirSync(env.TEMP, { recursive: true })
@@ -394,7 +535,7 @@ async function execute(o) {
   Object.assign(config, { ignoreRisk: true, openclawDir: panelDir, engineMode: 'hermes', enabledEngines: ['hermes'], engineSetupChoice: 'explicit' })
   fs.writeFileSync(panelPath, JSON.stringify(config))
   if (!fs.existsSync(path.join(panelDir, 'openclaw.json'))) fs.writeFileSync(path.join(panelDir, 'openclaw.json'), '{}')
-  const sources = compatibility ? report.compatibility.binding.sourceHashes : Object.fromEntries(['src-tauri/src/commands/hermes.rs', 'src-tauri/src/lib.rs', 'src-tauri/Cargo.lock', 'package.json'].map(f => [f, hash(path.join(root, f))]))
+  const sources = compatibility ? report.compatibility.binding.sourceHashes : Object.fromEntries(['src-tauri/src/commands/hermes.rs', 'src-tauri/src/lib.rs', 'src-tauri/Cargo.lock', 'package.json', ...(fs.existsSync(path.join(root, 'scripts/hermes-pm-runtime.js')) ? ['scripts/hermes-pm-runtime.js'] : [])].map(f => [f, hash(path.join(root, f))]))
   const watchedIdentities = new Map(), ports = new Set(), activeListeners = new Map()
   let driver, provider, client, providerPort, driverPort, nativePort
   const nativePids = new Set()
@@ -402,9 +543,9 @@ async function execute(o) {
     const receipt = { cmd, ok: false, at: new Date().toISOString() }; report.ipc.push(receipt)
     try { const value = await client.ipc(cmd, args, timeout); receipt.ok = true; return value } finally { save() }
   }
-  function runtimeHead() {
+  function runtimeHead(expected = OLD_RUNTIME.commit) {
     const r = spawnSync('git', ['--no-optional-locks', '-C', path.join(env.HERMES_HOME, 'hermes-agent'), 'rev-parse', 'HEAD'], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
-    assert.equal(r.status, 0, r.stderr); assert.equal(r.stdout.trim(), OLD_RUNTIME.commit, '旧runtime source HEAD已变化/升级'); return r.stdout.trim()
+    assert.equal(r.status, 0, r.stderr); assert.equal(r.stdout.trim(), expected, 'runtime source HEAD已变化/升级'); return r.stdout.trim()
   }
   async function compatibilityCheck(phase) {
     const state = await ipc('check_hermes'), commit = runtimeHead()
@@ -437,7 +578,7 @@ $owned=@($all|Where-Object {$_.ProcessId -ne $PID -and $_.ExecutablePath -ne $a 
 function Row($p){if(!$p -or !$p.CreationDate){throw 'missing CIM identity'};[pscustomobject]@{pid=[int]$p.ProcessId;creationDate=$p.CreationDate.ToUniversalTime().ToString('o');executablePath=$p.ExecutablePath;commandLine=$(if($owned.ProcessId -contains $p.ProcessId){$p.CommandLine}else{$null})}}
 $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq 'Listen' -and $ports -contains [int]$_.LocalPort}|Sort-Object LocalPort,OwningProcess -Unique|ForEach-Object {$c=$_;$p=$all|Where-Object {$_.ProcessId -eq $c.OwningProcess}|Select-Object -First 1;$r=Row $p;$r|Add-Member -NotePropertyName port -NotePropertyValue ([int]$c.LocalPort);$r})
 [pscustomobject]@{processes=@($owned|ForEach-Object {Row $_});listeners=$listeners;present=@($all|Where-Object {$tracked -contains [int]$_.ProcessId}|ForEach-Object {Row $_})}|ConvertTo-Json -Depth 6 -Compress`
-    const r = spawnSync('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 30000 })
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { env: psChildEnv, encoding: 'utf8', windowsHide: true, timeout: 30000 })
     assert.equal(r.status, 0, r.stderr)
     const data = JSON.parse(r.stdout.replace(/^\uFEFF/, ''))
     for (const p of data.processes) {
@@ -457,8 +598,8 @@ $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq '
   }
   function applicationPids() {
     const a = Buffer.from(app).toString('base64'), u = Buffer.from(env.WEBVIEW2_USER_DATA_FOLDER).toString('base64')
-    const code = `$a=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${a}'));$u=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${u}'));@(Get-CimInstance Win32_Process|Where-Object {$_.ProcessId -ne $PID -and ($_.ExecutablePath -eq $a -or ($_.Name -eq 'msedgewebview2.exe' -and $_.CommandLine -and $_.CommandLine.Contains($u)))}|Select-Object ProcessId,ExecutablePath,CreationDate)|ConvertTo-Json -Compress`
-    const r = spawnSync('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 30000 })
+    const code = `$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$a=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${a}'));$u=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${u}'));@(Get-CimInstance Win32_Process|Where-Object {$_.ProcessId -ne $PID -and ($_.ExecutablePath -eq $a -or ($_.Name -eq 'msedgewebview2.exe' -and $_.CommandLine -and $_.CommandLine.Contains($u)))}|Select-Object ProcessId,ExecutablePath,CreationDate)|ConvertTo-Json -Compress`
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { env: psChildEnv, encoding: 'utf8', windowsHide: true, timeout: 30000 })
     assert.equal(r.status, 0, r.stderr)
     const rows = r.stdout.trim() ? JSON.parse(r.stdout.replace(/^\uFEFF/, '')) : []
     return Array.isArray(rows) ? rows : [rows]
@@ -579,6 +720,53 @@ $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq '
     }
     for (const prompt of report.rounds.flatMap(x => x.prompts)) assert.equal(report.provider.filter(x => x.nonce === prompt.nonce && x.model === prompt.model && !x.title).length, 1, 'native 聊天请求缺失/重放')
     assert.ok(!report.providerError)
+    // 两轮原生聊天全部完成后，安装生命周期之前：实际named profile，不以default列表补绿。
+    report.profileRuntimeSource = { version: release.version, commit: release.commit, headBefore: runtimeHead(release.commit), headAfter: null, privateCompletionSha256: hash(path.join(webOutput, 'privatecompletion.json')) }
+    const bindArtifact = (value, directory, kind) => {
+      const reportFile = kind === 'named-profile' ? 'profile-qualification.json' : 'profile-collision.json'
+      const original = read(path.join(directory, reportFile)); assert.deepEqual(original, value, 'helper原始JSON与返回值不一致')
+      const binding = { scope: 'actual-native-profile-artifact', toolingSha: report.tooling.sha, sourceCommit: release.commit, version: release.version, home, kind, directory: path.relative(output, directory).replaceAll('\\', '/'), moduleHashes: Object.fromEntries(TOOLING_FILES.map(f => [f, toolingBefore.files[f].sha256])), reportFile, reportSha256: hash(path.join(directory, reportFile)), envelopeFile: 'native-bound.json' }
+      const envelope = path.join(directory, binding.envelopeFile)
+      fs.writeFileSync(envelope, JSON.stringify({ schemaVersion: 1, ...binding, report: original }, null, 2))
+      return { ...original, nativeBinding: { ...binding, envelopeSha256: hash(envelope) } }
+    }
+    report.namedProfiles = []
+    const defaultProfileOutput = path.join(output, 'named-profile-ui-default')
+    const defaultNamed = await qualifyHermesProfiles({ ipc, client, output: defaultProfileOutput, home, version: o['--version'], expectedCommit: release.commit, defaultSessionId: report.rounds.at(-1).sessionId, provider: 'custom', model: 'native-two', gatewayPort, runtimeSnapshot, cloneFromDefault: true, noSkills: false })
+    report.namedProfiles.push(bindArtifact(defaultNamed, defaultProfileOutput, 'named-profile')); save()
+    assert.equal(defaultNamed.status, 'passed', JSON.stringify(defaultNamed.errors))
+    const noSkillsOutput = path.join(output, 'named-profile-no-skills')
+    const noSkillsNamed = await qualifyHermesProfiles({ ipc, client, output: noSkillsOutput, home, version: o['--version'], expectedCommit: release.commit, defaultSessionId: report.rounds.at(-1).sessionId, provider: 'custom', model: 'native-two', gatewayPort, runtimeSnapshot, cloneFromDefault: true, noSkills: true })
+    report.namedProfiles.push(bindArtifact(noSkillsNamed, noSkillsOutput, 'named-profile')); save()
+    assert.equal(noSkillsNamed.status, 'passed', JSON.stringify(noSkillsNamed.errors))
+    report.profileCollisionDerivations = []
+    const deriveTaskName = async input => {
+      assert.equal(nativePath(input.home), nativePath(home)); assert.equal(input.sourceCommit, release.commit)
+      const spec = buildNativeTaskNameCommand({ root, home, release, completion, profileHome: input.profileHome })
+      assert.equal(nativePath(env.HERMES_HOME), nativePath(spec.ownerHome)); assert.equal(nativePath(env.HOME), nativePath(home))
+      if (spec.helperSha256) assert.equal(spec.helperSha256, sources['scripts/hermes-pm-runtime.js'], 'LAUNCH源码未绑定实际app/source')
+      const result = spawnSync(spec.program, spec.args, { env, cwd: spec.source, windowsHide: true, encoding: 'utf8', timeout: 60000, maxBuffer: 2 * 1024 * 1024 })
+      const index = report.profileCollisionDerivations.length + 1, prefix = `profile-task-name-${index}`
+      fs.writeFileSync(path.join(output, prefix + '.stdout.json'), result.stdout || ''); fs.writeFileSync(path.join(output, prefix + '.stderr.log'), result.stderr || String(result.error || ''))
+      const d = { profile: input.profile, home, profileHome: input.profileHome, sourceCommit: release.commit, program: spec.program, role: spec.role, exitCode: result.status, commandSha256: sha256(JSON.stringify({ program: spec.program, args: spec.args })), stdoutSha256: hash(path.join(output, prefix + '.stdout.json')), stderrSha256: hash(path.join(output, prefix + '.stderr.log')), privateCompletionSha256: report.profileRuntimeSource.privateCompletionSha256, evidenceKind: 'actual-private-runtime-python' }
+      report.profileCollisionDerivations.push(d); save(); assert.equal(result.status, 0, '实际私有Python命名失败；查看独立stderr原件')
+      const actual = JSON.parse(result.stdout.trim())
+      assert.equal(actual.method, 'original-get_task_name'); assert.equal(nativePath(actual.profileHome), nativePath(spec.profileHome))
+      assert.equal(nativePath(fs.realpathSync(physical(actual.python))), nativePath(fs.realpathSync(spec.expectedPython)), '命名未使用已验证私有Python')
+      assert.equal(nativePath(physical(actual.sourceFile)), nativePath(spec.expectedSourceFile), '原命名函数来源不是固定私有source')
+      Object.assign(d, { taskName: actual.taskName, python: actual.python, sourceFile: actual.sourceFile, programSha256: hash(spec.program), pythonSha256: hash(actual.python), sourceFileSha256: hash(actual.sourceFile) }); save()
+      return { taskName: actual.taskName, profileHome: actual.profileHome, method: actual.method, python: actual.python, sourceCommit: release.commit }
+    }
+    const collisionOutput = path.join(output, 'profile-collision')
+    const collision = await qualifyHermesProfileCollision({ ipc, client, home, output: collisionOutput, proof, version: release.version, expectedCommit: release.commit, deriveTaskName })
+    report.profileCollision = bindArtifact(collision, collisionOutput, 'collision'); save()
+    assert.equal(collision.status, 'passed-windows-profile-collision', JSON.stringify(collision.errors))
+    report.profileRuntimeSource.headAfter = runtimeHead(release.commit)
+    captureListeners(gatewayPort)
+    const profileDash = await ipc('hermes_dashboard_probe'); assert.ok(validPort(profileDash.port)); ports.add(profileDash.port); captureListeners(profileDash.port)
+    report.namedProfileStopProof = await stop(); save()
+    assertNativeNamedProfiles(report); assertNativeProfileCollision(report)
+    await observe(report.rounds.at(-1))
     if (compatibility) { await compatibilityHistory(); await compatibilityCheck('after-ui') }
     else {
     // Web 冷安装证明不代替 Rust 安装链：同 HOME 实际更新、保留数据卸载和重装。
@@ -590,7 +778,7 @@ $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq '
     report.nativeInstallerLifecycle = []
     const memory = path.join(env.HERMES_HOME, 'memories/native-qualification.txt')
     fs.mkdirSync(path.dirname(memory), { recursive: true }); fs.writeFileSync(memory, o['--sha'])
-    const memoryHash = hash(memory), release = read(path.join(webOutput, 'release.json'))
+    const memoryHash = hash(memory)
     const verifyData = async (installed) => {
       assert.equal(hash(memory), memoryHash, 'Rust 安装生命周期损坏记忆')
       assert.equal((await ipc('hermes_read_config')).model_raw, 'native-two', 'Rust 安装生命周期覆盖模型配置')
@@ -649,6 +837,10 @@ $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq '
         assert.deepEqual(Object.fromEntries(Object.keys(sources).map(f => [f, hash(path.join(root, f))])), sources, 'native源码发生漂移')
         assert.equal(hash(app), report.application.sha256)
         if (compatibility) assert.equal(spawnSync('git', ['--no-optional-locks', '-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).stdout.trim(), o['--sha'])
+      },
+      toolingFinal: async () => {
+        report.tooling.after = readNativeToolingSnapshot({ root: toolingRoot, sha: proof.toolingSha })
+        assert.deepEqual(report.tooling.after, report.tooling.before, 'harness/qualification/provider/profile/collision字节漂移')
       },
       nativeKill: async () => {
         // 仅清理实际EXE/私有WebView2，不按名称扫全机；失败不跳过后续核验。

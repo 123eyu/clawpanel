@@ -5,19 +5,43 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
+import crypto from 'node:crypto'
 
 const load = () => import('../scripts/test-hermes-tauri-qualification.mjs')
 const home = 'C:\\qualification\\h'
 const listener = (port = 18791) => ({ port, pid: 401, creationDate: '2026-10-16T01:00:00.000Z', executablePath: home + '\\.hermes\\venv\\Scripts\\python.exe', commandLine: 'python -m hermes_cli gateway run' })
 const stopped = () => ({ productionStop: true, identities: [listener()], present: [], listeners: [], ports: [18791], reachablePorts: [], pidsExited: true, portsClosed: true })
 function completeFixture(NATIVE_STEPS) {
-  const round = n => ({ round: n, steps: [...NATIVE_STEPS], gatewayListeners: [listener()], profiles: { active: 'default', profiles: [{ name: 'default' }] }, stopProofs: [stopped(), stopped()], samples: Array.from({ length: 42 }, (_, i) => ({ startedMs: i * 5000, finishedMs: i * 5000 + 100, health: { status: 'ok', platform: 'hermes-agent', version: '0.21.5' }, listeners: [listener()] })), elapsedSeconds: 210, observedErrors: [], historyReadbackAfterStop: true, prompts: [{ nonce: `native-${n}-a`, model: 'one' }, { nonce: `native-${n}-b`, model: 'one' }] })
+  const round = n => ({ round: n, sessionId: `native-session-${n}`, steps: [...NATIVE_STEPS], gatewayListeners: [listener()], profiles: { active: 'default', profiles: [{ name: 'default' }] }, stopProofs: [stopped(), stopped()], samples: Array.from({ length: 42 }, (_, i) => ({ startedMs: i * 5000, finishedMs: i * 5000 + 100, health: { status: 'ok', platform: 'hermes-agent', version: '0.21.5' }, listeners: [listener()] })), elapsedSeconds: 210, observedErrors: [], historyReadbackAfterStop: true, prompts: [{ nonce: `native-${n}-a`, model: n === 1 ? 'native-one' : 'native-two' }, { nonce: `native-${n}-b`, model: n === 1 ? 'native-one' : 'native-two' }] })
   const rounds = [round(1), round(2)]
-  return { completed: true, hostUnchanged: true, runtimeHome: home, gatewayPort: 18791, expectedVersion: '0.21.5', nativePage: { url: 'http://tauri.localhost/', ipc: true, windowLabel: 'main' }, rounds, cleanup: { ...stopped(), final: stopped() }, nativeInstallerLifecycle: ['update', 'uninstall', 'reinstall'].map(name => ({ name, passed: true, dataPreserved: true })), nativeProcessesExited: true, driverPortsClosed: true, provider: rounds.flatMap(x => x.prompts.map(p => ({ ...p, title: false, authenticated: true }))) }
+  return { completed: true, hostUnchanged: true, runtimeHome: home, gatewayPort: 18791, expectedVersion: '0.21.5', nativePage: { url: 'http://tauri.localhost/', ipc: true, windowLabel: 'main' }, rounds, cleanup: { ...stopped(), final: stopped() }, nativeInstallerLifecycle: ['update', 'uninstall', 'reinstall'].map(name => ({ name, passed: true, dataPreserved: true })), nativeProcessesExited: true, driverPortsClosed: true, provider: rounds.flatMap(x => x.prompts.map(p => ({ ...p, title: false, authenticated: true }))), profileRuntimeSource: { version: '0.21.5', commit: oldCommit, headBefore: oldCommit, headAfter: oldCommit }, namedProfiles: [namedProfileFixture()], namedProfileStopProof: stopped(), executionMode: 'actual-github-hosted-windows-vm-native', runner: runnerFixture(), tooling: toolingFixture(), profileQualificationModuleSha256: digest, profileCollisionModuleSha256: digest, profileCollision: collisionFixture(), profileCollisionDerivations: derivationsFixture() }
 }
 const appSha = 'a'.repeat(40), seedSha = 'b'.repeat(40)
 const oldCommit = 'f97608f178d1ffeca59860195ab7da295f7c8e5f', newCommit = 'd923a5eb487a17c0a68801bba9ef0f56c81040a8'
 const digest = '1'.repeat(64)
+const toolingFiles = ['scripts/test-hermes-tauri-qualification.mjs', 'scripts/test-hermes-windows-qualification.mjs', 'scripts/hermes-qualification-provider.mjs', 'scripts/hermes-qualification-profiles.mjs', 'scripts/hermes-qualification-profile-collision.mjs']
+function runnerFixture() { return { platform: 'win32', arch: 'x64', runnerEnvironment: 'github-hosted', runnerOS: 'Windows', event: 'workflow_dispatch', ref: 'refs/heads/main', repository: 'qingchencloud/clawpanel', workflowRef: 'qingchencloud/clawpanel/.github/workflows/hermes-qualification.yml@refs/heads/main', workflowSha: appSha, toolingSha: appSha, runId: '123', attempt: '1', imageOS: 'win25', imageVersion: '20261016', userName: 'runneradmin', sid: 'S-1-5-21-1-2-3-4', actualProfile: 'C:\\Users\\runneradmin', registeredProfile: 'C:\\Users\\runneradmin', virtualMachine: true } }
+function toolingFixture() { const snapshot = { sha: appSha, files: Object.fromEntries(toolingFiles.map(f => [f, { sha256: digest, gitBlob: '2'.repeat(40) }])) }; return { sha: appSha, scope: 'github-hosted-main-native-tooling', before: structuredClone(snapshot), after: structuredClone(snapshot) } }
+function artifactBinding(kind) { return { scope: 'actual-native-profile-artifact', toolingSha: appSha, sourceCommit: oldCommit, version: '0.21.5', home, kind, directory: kind === 'named-profile' ? 'named-profile-ui-default' : 'profile-collision', moduleHashes: Object.fromEntries(toolingFiles.map(f => [f, digest])), reportFile: kind === 'named-profile' ? 'profile-qualification.json' : 'profile-collision.json', reportSha256: digest, envelopeFile: 'native-bound.json', envelopeSha256: digest } }
+function collisionFixture() {
+  const nonce = 'abcdef012345678901234567', marker = 'ClawPanel profile collision 123/1/' + nonce
+  const cases = ['rename', 'delete'].map(operation => {
+    const name = `qualc-${nonce}-${operation}`, taskName = 'original-' + name, script = `C:\\evidence\\foreign-home\\${operation}\\never-run.ps1`
+    const task = { state: 'exists', name: taskName, marker, sha256: digest, enabled: false, triggers: 0, userId: runnerFixture().sid, runLevel: 0, logonType: 3, lastRunTime: '1899-12-30T00:00:00', lastTaskResult: 0x41303, action: script, actions: 1, allowDemandStart: false, executable: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' }
+    return { operation, name, renamed: name + '-renamed', stage: 'complete', priorTask: { state: 'missing', hresult: '0x80070002' }, derivation: { taskName, profileHome: `${home}\\.hermes\\profiles\\${name}`, python: `${home}\\.hermes\\hermes-agent\\venv\\Scripts\\python.exe`, method: 'original-get_task_name', sourceCommit: oldCommit }, sentinel: { name: taskName, marker, sid: runnerFixture().sid, script }, taskBefore: task, taskAfter: structuredClone(task), executionCount: 0, executionProof: 'SCHED_S_TASK_HAS_NOT_RUN + unchanged LastRunTime + absent owned execution canary', sentinelRemoved: true, normalCrudPassed: true, normalCrudLayer: 'actual Dashboard API via Rust IPC + filesystem/list readback', collisionDisposition: 'old21-profile-mutation-succeeded-task-retained', receipts: [{ method: operation === 'rename' ? 'PATCH' : 'DELETE', path: '/api/profiles/' + name, ok: true }], treeBefore: [{ path: '', type: 'directory' }], foreignBefore: [{ path: 'never-run.ps1', bytes: 10, sha256: digest }] }
+  })
+  return { schemaVersion: 1, status: 'passed-windows-profile-collision', evidenceKind: 'real-windows-vm-native-modal', version: '0.21.5', source: { sourceCommit: oldCommit, sourceHashes: Object.fromEntries(['hermes_constants.py', 'hermes_cli/gateway.py', 'hermes_cli/gateway_windows.py', 'hermes_cli/profiles.py'].map(f => [f, digest])) }, nonce, marker, runId: '123', attempt: '1', cases, screenshots: ['rename-collision.png', 'delete-collision.png'].map(file => ({ file, sha256: digest })), gaps: [], errors: [], nativeBinding: artifactBinding('collision') }
+}
+function derivationsFixture() { return collisionFixture().cases.map(c => ({ profile: c.name, taskName: c.derivation.taskName, sourceCommit: oldCommit, home, profileHome: c.derivation.profileHome, python: c.derivation.python, sourceFile: `${home}\\.hermes\\hermes-agent\\hermes_cli\\gateway_windows.py`, program: c.derivation.python, role: 'legacy-private-venv-get-task-name', exitCode: 0, commandSha256: digest, stdoutSha256: digest, stderrSha256: digest, programSha256: digest, pythonSha256: digest, sourceFileSha256: digest, evidenceKind: 'actual-private-runtime-python' })) }
+function namedProfileFixture() {
+  const name = 'qualp-123456abcdef', renamed = name + '-renamed'
+  return { schemaVersion: 1, status: 'passed', evidenceKind: 'production-ipc-native-gui', version: '0.21.5', expectedCommit: oldCommit, provider: 'custom', model: 'native-two', defaultSessionId: 'native-session-2', modelReadback: { provider: 'custom', model: 'native-two' }, name, renamed, cloneFromDefault: true, noSkills: false,
+    steps: ['baseline-history-and-task-definitions', 'dashboard-proxy-create-and-model-readback', 'default-to-named-gui-runtime-and-boot', 'stop-named-restore-default', 'gui-rename-delete-and-physical-readback'],
+    screenshots: ['named-visible.png', 'named-active.png', 'restored-default.png', 'before-rename.png', 'renamed-visible.png', 'deleted.png'].map(file => ({ file, sha256: digest })),
+    namedListeners: [listener()], defaultListeners: [listener()], namedRuntime: { file: `profiles/${name}/gateway_state.json`, sha256: digest, pid: 401, profile: name }, boot: { applicable: false, reason: 'legacy-no-PM-boot-record-contract' },
+    guiReceipts: [{ method: 'PATCH', path: `/api/profiles/${name}`, ok: true, name: renamed }, { method: 'DELETE', path: `/api/profiles/${renamed}`, ok: true, identity_settled: true, settlement_pending: false }],
+    historyBefore: { sha256: digest, messages: 2 }, historyAfter: { sha256: digest, messages: 2 }, tasks: { before: [{ name: '\\ReadonlyTask', sha256: digest }], after: [{ name: '\\ReadonlyTask', sha256: digest }] }, nativeBinding: artifactBinding('named-profile'), gaps: [], errors: [], startedAt: '2026-10-16T01:00:00.000Z', finishedAt: '2026-10-16T01:01:00.000Z' }
+}
 function seedFixture() {
   const runner = { sid: 'S-1-5-21-1-2-3-4', actualProfile: 'C:\\Users\\runneradmin', runId: '123', attempt: '1', imageOS: 'win25', imageVersion: '20261016', virtualMachine: true }
   return { appSha, seedSha, home, webOutput: 'C:\\qualification', runner, seedProof: { ...runner }, release: { version: '0.21.5', commit: oldCommit }, completion: { version: '0.21.5', commit: oldCommit }, prior: { status: 'passed-web-native-missing', candidateSha: seedSha, expectedVersion: '0.21.5', hostUnchanged: true, environment: { home, hermesHome: home + '\\.hermes', sourceSha: seedSha }, stages: ['source-isolation', 'install-privatecompletion', 'runtime-ui', 'update-stop', 'uninstall-reinstall-preserve'].map(name => ({ name, status: 'passed' })), browser: { actualChromium: true, completeReply: true, historyAfterReload: true, pageErrors: [], trace: 'trace.zip', screenshots: ['history.png'], prompts: [{ nonce: 'hq-seed', reply: 'seed reply', model: 'seed' }] } } }
@@ -119,6 +143,116 @@ test('native 完整回执拒绝短测、漏步骤、运行错误和原生进程�
   ]) { const bad = structuredClone(r); mutate(bad); assert.throws(() => assertNativeComplete(bad)) }
 })
 
+test('完整与新app旧runtime资格都必须具备完整 namedProfiles 实测，不因default列表/文件存在补绿', async () => {
+  const { assertNativeComplete, assertNativeCompatibilityComplete, NATIVE_STEPS } = await load()
+  for (const [fixture, gate] of [[completeFixture, assertNativeComplete], [compatibilityFixture, assertNativeCompatibilityComplete]]) {
+    const good = fixture(NATIVE_STEPS); assert.doesNotThrow(() => gate(good))
+    for (const mutate of [
+      r => { delete r.namedProfiles }, r => { r.namedProfiles = [{ status: 'passed', file: 'profile-qualification.json' }] },
+      r => { r.namedProfiles[0].evidenceKind = 'isolated-fixture' }, r => { r.namedProfiles[0].steps.pop() },
+      r => { r.namedProfiles[0].noSkills = true }, r => { r.namedProfiles[0].cloneFromDefault = false },
+      r => { r.namedProfiles[0].defaultSessionId = 'first-round-not-last' }, r => { r.namedProfiles[0].model = 'native-one' },
+      r => { r.namedProfiles[0].modelReadback.model = 'other' }, r => { r.namedProfiles[0].namedListeners = [] },
+      r => { r.namedProfiles[0].namedRuntime.pid = 999 }, r => { r.namedProfiles[0].defaultListeners = [] },
+      r => { r.namedProfiles[0].historyAfter.sha256 = '2'.repeat(64) }, r => { delete r.namedProfiles[0].tasks },
+      r => { r.namedProfiles[0].tasks.after = [] }, r => { r.namedProfiles[0].guiReceipts.pop() },
+      r => { r.namedProfiles[0].guiReceipts[1].settlement_pending = true }, r => { r.namedProfiles[0].screenshots = [] },
+      r => { r.namedProfiles[0].errors.push('unhandled') }, r => { r.namedProfiles[0].gaps.push('missing') },
+      r => { r.profileRuntimeSource.headAfter = newCommit }, r => { delete r.namedProfileStopProof },
+    ]) { const bad = structuredClone(good); mutate(bad); assert.throws(() => gate(bad), 'namedProfiles 实测缺项必须失败') }
+  }
+})
+
+test('新22.2 named boot必须绑定真实expectedcommit；旧21.5不虚构PM boot/served字段', async () => {
+  const { assertNativeNamedProfiles, NATIVE_STEPS } = await load(); assert.equal(typeof assertNativeNamedProfiles, 'function')
+  const old = completeFixture(NATIVE_STEPS); assert.doesNotThrow(() => assertNativeNamedProfiles(old))
+  const current = structuredClone(old); current.expectedVersion = '0.22.2'
+  current.profileRuntimeSource = { version: '0.22.2', commit: newCommit, headBefore: newCommit, headAfter: newCommit }
+  Object.assign(current.namedProfiles[0], { version: '0.22.2', expectedCommit: newCommit, boot: { applicable: true, file: `installs/1234567890abcdef/bootstrap/${current.namedProfiles[0].name}.json`, sha256: digest, identity: newCommit, bootstrappedAt: '2026-10-16T01:00:00Z', steps: ['migrate', 'expose_cli'] } })
+  current.namedProfiles[0].namedRuntime.servedProfiles = [current.namedProfiles[0].name]
+  Object.assign(current.namedProfiles[0].nativeBinding, { version: '0.22.2', sourceCommit: newCommit })
+  assert.doesNotThrow(() => assertNativeNamedProfiles(current))
+  for (const mutate of [r => { delete r.namedProfiles[0].boot }, r => { r.namedProfiles[0].boot.identity = oldCommit }, r => { r.namedProfiles[0].boot.steps = [] }, r => { r.namedProfiles[0].expectedCommit = oldCommit }, r => { r.namedProfiles[0].boot.bootstrappedAt = '' }, r => { r.namedProfiles[0].boot.file = 'installs/other-profile.json' }, r => { r.namedProfiles[0].namedRuntime.servedProfiles = [] }]) { const bad = structuredClone(current); mutate(bad); assert.throws(() => assertNativeNamedProfiles(bad)) }
+})
+
+test('真实native接线在两轮UI后、installer之前用同client/ipc/端口/监听和最后session，默认true/false', () => {
+  const source = fs.readFileSync(new URL('../scripts/test-hermes-tauri-qualification.mjs', import.meta.url), 'utf8')
+  assert.match(source, /import[^\n]*qualifyHermesProfiles[^\n]*hermes-qualification-profiles\.mjs/)
+  const call = source.indexOf('await qualifyHermesProfiles('), afterRounds = source.indexOf('for (const prompt of report.rounds.flatMap'), lifecycle = source.indexOf('report.nativeInstallerLifecycle = []')
+  assert.ok(call > afterRounds && call < lifecycle)
+  const wiring = source.slice(call, source.indexOf('})', call) + 2)
+  for (const value of ['ipc', 'client', 'gatewayPort', 'runtimeSnapshot', "model: 'native-two'", "provider: 'custom'", 'defaultSessionId: report.rounds.at(-1).sessionId', 'cloneFromDefault: true', 'noSkills: false', 'expectedCommit: release.commit']) assert.ok(wiring.includes(value), value)
+  assert.match(source, /profileQualificationModuleSha256/); assert.match(source, /assertNativeNamedProfiles\(r\)/)
+})
+
+// 先列失败方式：fixture冒充、缺 helper/Git blob/pre-post、缺碰撞/派生、来源/owner/Python错、遗漏一个mutation。
+test('full/compat都强制真实collision及五个tooling依赖pre/post，fixture/status bool不能补绿', async () => {
+  const { NATIVE_STEPS, assertNativeComplete, assertNativeCompatibilityComplete } = await load()
+  for (const [make, gate] of [[completeFixture, assertNativeComplete], [compatibilityFixture, assertNativeCompatibilityComplete]]) {
+    const good = make(NATIVE_STEPS); assert.doesNotThrow(() => gate(good))
+    for (const mutate of [
+      r => { delete r.executionMode }, r => { r.executionMode = 'isolated-fixture' }, r => { delete r.tooling },
+      r => { r.tooling.sha = seedSha }, r => { r.tooling.scope = 'fixture' }, r => { delete r.tooling.after },
+      r => { delete r.tooling.before.files[toolingFiles[3]] }, r => { r.tooling.after.files[toolingFiles[4]].sha256 = '3'.repeat(64) },
+      r => { r.profileQualificationModuleSha256 = '' }, r => { r.profileCollisionModuleSha256 = '' },
+      r => { delete r.profileCollision }, r => { r.profileCollision = { status: 'passed-windows-profile-collision' } },
+      r => { r.profileCollision.evidenceKind = 'isolated-fixture' }, r => { r.profileCollision.status = 'passed-fixture' },
+      r => { r.profileCollision.cases.pop() }, r => { r.profileCollision.cases[0].normalCrudPassed = false },
+      r => { r.profileCollision.cases[0].executionCount = 1 }, r => { r.profileCollision.cases[0].taskAfter.sha256 = '4'.repeat(64) },
+      r => { r.profileCollision.cases[0].taskBefore.enabled = true }, r => { r.profileCollision.cases[0].taskBefore.userId = 'S-1-5-18' },
+      r => { for (const key of ['taskBefore', 'taskAfter']) r.profileCollision.cases[0][key].actions = 2 },
+      r => { for (const key of ['taskBefore', 'taskAfter']) r.profileCollision.cases[0][key].allowDemandStart = true },
+      r => { r.profileCollision.cases[0].sentinel.marker = 'foreign' },
+      r => { r.profileCollision.source.sourceCommit = newCommit }, r => { r.profileCollision.source.sourceHashes = {} },
+      r => { r.profileCollision.nativeBinding.toolingSha = seedSha }, r => { delete r.namedProfiles[0].nativeBinding },
+      r => { delete r.profileCollision.nativeBinding.directory }, r => { r.namedProfiles[0].nativeBinding.directory = '../foreign' },
+      r => { r.namedProfiles[0].nativeBinding.moduleHashes[toolingFiles[0]] = '' },
+      r => { r.profileCollisionDerivations = [] }, r => { r.profileCollisionDerivations[0].evidenceKind = 'fixture' },
+      r => { r.profileCollisionDerivations[0].python = 'C:\\foreign\\python.exe' }, r => { r.profileCollisionDerivations[0].sourceFile = 'C:\\foreign\\gateway_windows.py' },
+      r => { r.profileCollisionDerivations[0].exitCode = 1 }, r => { r.profileCollision.errors.push('failed') },
+      r => { r.profileCollisionDerivations[0].sourceFileSha256 = 'f'.repeat(64) }, r => { delete r.profileCollisionDerivations[0].programSha256 },
+      r => { r.profileCollisionDerivations[0].program = home + '\\foreign\\python.exe' },
+    ]) { const bad = structuredClone(good); mutate(bad); assert.throws(() => gate(bad)) }
+  }
+})
+
+test('tooling读取必须是完整五文件实际Git blob SHA1/SHA256，不接受工作区字节/stale SHA', async t => {
+  const { readNativeToolingSnapshot } = await load(); assert.equal(typeof readNativeToolingSnapshot, 'function')
+  const base = fs.realpathSync(os.tmpdir()), root = fs.mkdtempSync(path.join(base, 'native-tooling-owned-'))
+  t.after(() => { assert.ok(path.relative(base, fs.realpathSync(root)).startsWith('native-tooling-owned-')); fs.rmSync(root, { recursive: true, force: true }) })
+  const git = a => { const r = spawnSync('git', ['-C', root, ...a], { encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim() }
+  git(['init', '-q']); git(['config', 'core.autocrlf', 'false']); git(['config', 'user.name', 'fixture']); git(['config', 'user.email', 'fixture@example.invalid'])
+  for (const f of toolingFiles) { fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true }); fs.writeFileSync(path.join(root, f), '// isolated fixture\n') }
+  git(['add', '--', ...toolingFiles]); git(['commit', '-qm', 'fixture']); const sha = git(['rev-parse', 'HEAD'])
+  const actual = readNativeToolingSnapshot({ root, sha }); assert.equal(Object.keys(actual.files).length, 5)
+  for (const f of toolingFiles) { assert.match(actual.files[f].gitBlob, /^[a-f0-9]{40}$/); assert.match(actual.files[f].sha256, /^[a-f0-9]{64}$/) }
+  assert.throws(() => readNativeToolingSnapshot({ root, sha: appSha }))
+  fs.appendFileSync(path.join(root, toolingFiles[3]), '// changed'); assert.throws(() => readNativeToolingSnapshot({ root, sha }))
+})
+
+test('碰撞实际接线复用privatecompletion，oldvenv/new LAUNCH固定Python不接受HTTP/任意code', async t => {
+  const { buildNativeTaskNameCommand } = await load(); assert.equal(typeof buildNativeTaskNameCommand, 'function')
+  const base = fs.realpathSync(os.tmpdir()), dir = fs.mkdtempSync(path.join(base, 'native-python-owned-'))
+  t.after(() => { assert.ok(path.relative(base, fs.realpathSync(dir)).startsWith('native-python-owned-')); fs.rmSync(dir, { recursive: true, force: true }) })
+  const h = path.join(dir, 'h'), root = path.join(dir, 'app'), source = path.join(h, '.hermes/hermes-agent'), profileHome = path.join(h, '.hermes/profiles/qualc-fixture')
+  const write = f => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, 'fixture not executed') }
+  fs.mkdirSync(profileHome, { recursive: true })
+  const python = path.join(source, 'venv/Scripts/python.exe'), cli = path.join(source, 'venv/Scripts/hermes.exe'); write(python); write(cli)
+  const modules = Object.fromEntries(['hermes_cli.main', 'fastapi', 'uvicorn'].map(n => { const f = path.join(source, 'fixture-modules', n + '.py'); write(f); return [n, f] }))
+  const stages = ['repository', 'venv', 'python-deps', 'config', 'complete']
+  const completion = { version: '0.21.5', commit: oldCommit, python, cli, modules, commandSpec: { program: cli, args: ['--version'], role: 'legacy-managed-hermes-cli' }, requiredStages: stages, stages: stages.map(name => ({ name, exitCode: 0 })) }
+  const options = { root, home: h, profileHome, release: { version: '0.21.5', commit: oldCommit }, completion }
+  const spec = buildNativeTaskNameCommand(options); assert.equal(spec.program, python); assert.deepEqual(spec.args.slice(0, 3), ['-I', '-B', '-c']); assert.match(spec.args[3], /get_task_name|redirect_stdout/); assert.equal(spec.role, 'legacy-private-venv-get-task-name')
+  for (const mutate of [x => { x.profileHome = root }, x => { x.release.commit = newCommit }, x => { x.completion.commandSpec.args = ['-c', 'arbitrary'] }, x => { x.completion.python = 'https://example.invalid/python' }, x => { x.completion.commandSpec.program = 'python' }]) { const bad = structuredClone(options); mutate(bad); assert.throws(() => buildNativeTaskNameCommand(bad)) }
+  const helper = path.join(root, 'scripts/hermes-pm-runtime.js'), launch = `PIN='${newCommit}'\n# fixture LAUNCH not executed`, metadata = `PIN='${newCommit}'\n# fixture metadata not executed`
+  fs.mkdirSync(path.dirname(helper), { recursive: true }); fs.writeFileSync(helper, `export const HERMES_PRIVATE_LAUNCH_SCRIPT = String.raw\`${launch}\n\`\nexport const HERMES_PRIVATE_METADATA_SCRIPT = String.raw\`${metadata}\n\`\n`)
+  const dependency = path.join(h, '.hermes/installs/key/environments/fixture/Scripts/python.exe'), selected = path.join(h, '.hermes/tools/python/python.exe'); write(dependency); write(selected)
+  const current = structuredClone(options); current.release = { version: '0.22.2', commit: newCommit }
+  Object.assign(current.completion, { version: '0.22.2', commit: newCommit, python: selected, commandSpec: { program: dependency, args: ['-I', '-B', '-c', metadata, source, newCommit], role: 'pm-bootstrap-metadata', actualSelectedInterpreter: selected }, pm: { selectedStorePython: selected, dependencyPython: dependency, helperSha256: crypto.createHash('sha256').update(fs.readFileSync(helper)).digest('hex'), completion: { commit: newCommit, current: true, same: true, completed: true, pending: false }, preflight: { commit: newCommit, current: true, same: true, completed: true, command: ['profile', 'list'] } } })
+  const pm = buildNativeTaskNameCommand(current); assert.equal(pm.program, dependency); assert.equal(pm.args[3], launch); assert.equal(pm.args.at(-2), '--python-json'); assert.equal(pm.role, 'pm-launch-get-task-name')
+  for (const mutate of [x => { x.completion.pm.helperSha256 = '0'.repeat(64) }, x => { x.completion.commandSpec.args[3] = 'arbitrary code' }, x => { x.completion.commandSpec.program = python }]) { const bad = structuredClone(current); mutate(bad); assert.throws(() => buildNativeTaskNameCommand(bad)) }
+})
+
 test('完整门禁拒绝补采、错误health、空PID及伪profiles证明', async () => {
   const { assertNativeComplete, NATIVE_STEPS } = await load()
   for (const mutate of [
@@ -193,6 +327,41 @@ test('profiles必须实际数组并含default，明确每次refresh监听空窗'
   for (const bad of [null, true, {}, { active: 'default', profiles: [] }, { profiles: { name: 'default' } }, { profiles: [{ name: 'other' }] }]) assert.throws(() => assertNativeProfiles(bad))
   const source = fs.readFileSync(new URL('../scripts/test-hermes-tauri-qualification.mjs', import.meta.url), 'utf8')
   assert.match(source, /errorObservationScope:[^\n]*every refresh/)
+})
+
+function nativePsEncodingPrefixes() {
+  const source = fs.readFileSync(new URL('../scripts/test-hermes-tauri-qualification.mjs', import.meta.url), 'utf8')
+  return ['runtimeSnapshot', 'applicationPids'].map(name => {
+    const start = source.indexOf(`  function ${name}() {`)
+    assert.ok(start >= 0)
+    const declaration = source.indexOf('const code = `', start)
+    const end = source.indexOf('`\n    const r = spawnSync', declaration)
+    assert.ok(declaration > start && end > declaration)
+    const body = source.slice(declaration, end)
+    const prefix = body.match(/\[Console\]::OutputEncoding=\[Text\.UTF8Encoding\]::new\(\$false\);?/g)?.[0] || ''
+    return { name, prefix, body }
+  })
+}
+
+test('native两个PS5 JSON观察helper都在CIM读取前固定Console UTF8', () => {
+  for (const { name, prefix, body } of nativePsEncodingPrefixes()) assert.ok(prefix && body.indexOf(prefix) < body.indexOf('Get-CimInstance'), `${name}缺失Console UTF8，长cmdline弯引号会best-fit破坏JSON`)
+})
+
+test('PS5只读常量长JSON复现OEM best-fit quote并验证两个native前缀，不查询宿主CIM/任务', { skip: process.platform !== 'win32' }, () => {
+  // 只序列化本测试常量；绝不执行CIM/任务查询或真实命令行，不设置宿主chcp。
+  const value = 'x'.repeat(24000) + '中文“quoted”-‘single’-' + 'y'.repeat(3000)
+  const data = Buffer.from('中文“quoted”-‘single’-').toString('base64')
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => ['systemroot', 'windir', 'path', 'temp', 'tmp', 'comspec'].includes(k.toLowerCase())))
+  const run = prefix => {
+    const code = `[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(437);${prefix};$v=('x'*24000)+[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${data}'))+('y'*3000);[pscustomobject]@{commandLine=$v}|ConvertTo-Json -Compress`
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { env, encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 })
+    assert.equal(result.status, 0, 'fixture PS5常量序列化失败'); return result.stdout.replace(/^\uFEFF/, '').trim()
+  }
+  assert.throws(() => JSON.parse(run('')), SyntaxError, 'CP437弯引号best-fit必须复现JSON破坏，而非截断')
+  for (const { name, prefix } of nativePsEncodingPrefixes()) {
+    assert.ok(prefix, `${name}未提供实际UTF8前缀`)
+    assert.equal(JSON.parse(run(prefix)).commandLine, value, `${name}长JSON Unicode未完整保留`)
+  }
 })
 
 test('native Provider只读metadata逐项404留证，不当聊天；unknown/坏JSON/错误chat认证仍红', async () => {
