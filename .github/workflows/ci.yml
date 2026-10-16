@@ -23,8 +23,6 @@ jobs:
   check:
     name: 检查 (${{ matrix.platform.name }})
     runs-on: ${{ matrix.platform.os }}
-    env:
-      HERMES_BOUNDS_TEST_EVIDENCE: ${{ runner.temp }}/hermes-bounds-ci
     strategy:
       fail-fast: false
       matrix:
@@ -97,9 +95,13 @@ jobs:
 
       # Node 单元测试
       - name: 准备 CLI 自有夹具诊断目录
+        env:
+          HERMES_BOUNDS_TEST_EVIDENCE: ${{ runner.temp }}/hermes-bounds-ci
         run: node -e 'const fs=require("node:fs");fs.mkdirSync(process.env.HERMES_BOUNDS_TEST_EVIDENCE,{recursive:true})'
 
       - name: Node 单元测试
+        env:
+          HERMES_BOUNDS_TEST_EVIDENCE: ${{ runner.temp }}/hermes-bounds-ci
         run: node --test tests/*.test.js
 
       # Pi 的固定版本在三平台实际启动；只调用本地模拟 Provider。
