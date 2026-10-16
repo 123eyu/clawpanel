@@ -53,6 +53,7 @@ RUN apk add --no-cache \
     iproute2 \
     procps \
     lsof \
+    libatomic \
     tzdata
 
 # 设置时区

@@ -650,6 +650,11 @@ export function render() {
     `
   }
 
+  function updateSendButton() {
+    const button = el.querySelector('#hm-chat-send')
+    if (button) button.disabled = !store.activeSession() || (!inputValue.trim() && !pendingAttachments.length) || hermesInstalled === false || !gwOnline || store.state.streaming
+  }
+
   function renderInput() {
     const active = store.activeSession()
     const streaming = store.state.streaming
@@ -1174,6 +1179,8 @@ export function render() {
       input.addEventListener('input', () => {
         inputValue = input.value
         inputCaret = input.selectionStart || inputValue.length
+        // 普通输入刻意不重绘整页，但发送按钮必须同步更新。
+        updateSendButton()
         const wasShowing = showSlash
         if (inputValue.startsWith('/') && !inputValue.includes(' ')) {
           showSlash = true

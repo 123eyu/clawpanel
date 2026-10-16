@@ -4,6 +4,7 @@
  * 使浏览器模式能真正管理 OpenClaw 实例
  */
 import fs from 'fs'
+import { sanitizeOpenCodeStorage } from './opencode-proxy.js'
 import path from 'path'
 import os from 'os'
 import { homedir, networkInterfaces } from 'os'
@@ -329,6 +330,16 @@ function uvBinDir() {
   }
   if (isMac) return path.join(homedir(), 'Library', 'Application Support', 'clawpanel', 'bin')
   return path.join(homedir(), '.local', 'share', 'clawpanel', 'bin')
+}
+
+// 独立引擎只补齐宿主工具路径，不读取 Hermes PM 或注入 Hermes 受管工具。
+export function independentRuntimePath() {
+  const home = homedir()
+  const extra = [path.dirname(process.execPath), uvBinDir()]
+  if (isWindows && process.env.APPDATA) extra.push(path.join(process.env.APPDATA, 'uv', 'tools', 'bin'))
+  extra.push(path.join(home, '.local', 'bin'), path.join(home, '.cargo', 'bin'))
+  if (!isWindows) extra.push('/usr/local/bin', '/usr/bin', '/bin')
+  return [...extra, process.env.PATH || ''].filter(Boolean).join(path.delimiter)
 }
 
 function hermesEnhancedPath() {
@@ -925,9 +936,10 @@ function addCliCandidate(candidates, seen, rawPath) {
   candidates.push(normalized)
 }
 
-function findCommandPath(command) {
+function findCommandPath(command, env = process.env) {
   try {
     const output = execSync(isWindows ? `where ${command}` : `which ${command} 2>/dev/null`, {
+      env,
       timeout: 3000,
       windowsHide: true,
       encoding: 'utf8',
@@ -2664,6 +2676,36 @@ async function getLatestVersionFor(source = 'official') {
 const _sessions = new Map() // token → { expires }
 const SESSION_TTL = 24 * 60 * 60 * 1000 // 24h
 const AUTH_EXEMPT = new Set(['auth_check', 'auth_login', 'auth_logout'])
+
+let _webEmbedAuthGeneration = 0
+
+// 能力独立于面板 Cookie；单管理员认证变化时统一撤销，但不额外注销其他面板会话。
+function revokeWebEmbedCapabilities() {
+  _webEmbedAuthGeneration++
+  clearDshEmbedSessions()
+  clearOpenCodeEmbedSessions()
+}
+
+function webEmbedAuthChanged(before, after) {
+  return (before.accessPassword || '') !== (after.accessPassword || '')
+    || Boolean(before.ignoreRisk) !== Boolean(after.ignoreRisk)
+}
+
+function closeWebEmbedSession(session) {
+  if (!session) return
+  session.revoked = true
+  for (const close of session.connections || []) {
+    try { close() } catch {}
+  }
+  session.connections?.clear()
+}
+
+function trackWebEmbedConnection(session, close) {
+  const connections = session.connections ||= new Set()
+  connections.add(close)
+  if (session.revoked) queueMicrotask(close)
+  return () => connections.delete(close)
+}
 
 // 登录限速：防暴力破解（IP 级别，5次失败后锁定60秒）
 const _loginAttempts = new Map() // ip → { count, lockedUntil }
@@ -11655,16 +11697,22 @@ function isManagedDshProcess(record) {
 }
 
 function clearDshEmbedSessions() {
+  for (const session of _dshEmbedSessions.values()) closeWebEmbedSession(session)
   _dshEmbedSessions.clear()
+  _dshProxyAgent.destroy()
 }
 
 function pruneDshEmbedSessions(now = Date.now()) {
   for (const [token, session] of _dshEmbedSessions) {
-    if (now > session.expiresAt || now > session.maxExpiresAt) _dshEmbedSessions.delete(token)
+    if (now > session.expiresAt || now > session.maxExpiresAt) {
+      closeWebEmbedSession(session)
+      _dshEmbedSessions.delete(token)
+    }
   }
   while (_dshEmbedSessions.size > DSH_EMBED_MAX_SESSIONS) {
     const oldest = _dshEmbedSessions.keys().next().value
     if (!oldest) break
+    closeWebEmbedSession(_dshEmbedSessions.get(oldest))
     _dshEmbedSessions.delete(oldest)
   }
 }
@@ -11676,6 +11724,7 @@ function resolveDshEmbedSession(token) {
   if (!session) return null
   const record = readDshPidRecord()
   if (!record || record.pid !== session.pid || Number(record.port) !== session.port || !isManagedDshProcess(record)) {
+    closeWebEmbedSession(session)
     _dshEmbedSessions.delete(token)
     return null
   }
@@ -11699,6 +11748,7 @@ function normalizeDshEmbedStorage(input) {
 }
 
 async function createDshEmbedSession(portValue = DSH_DEFAULT_PORT, storageValue = {}) {
+  const authGeneration = _webEmbedAuthGeneration
   const port = normalizeDshPort(portValue)
   const status = await dshStatus(port)
   const record = readDshPidRecord()
@@ -11717,6 +11767,7 @@ async function createDshEmbedSession(portValue = DSH_DEFAULT_PORT, storageValue 
     expiresAt: now + DSH_EMBED_IDLE_TTL,
     maxExpiresAt: now + DSH_EMBED_MAX_TTL,
   }
+  if (authGeneration !== _webEmbedAuthGeneration) throw Object.assign(new Error('面板认证状态已更新，请重新加载工作台'), { code: 'EMBED_AUTH_CHANGED' })
   _dshEmbedSessions.set(token, session)
   pruneDshEmbedSessions(now)
   return {
@@ -11769,6 +11820,9 @@ function copyDshProxyResponseHeaders(upstreamHeaders, res, { rewrite, prefix }) 
     res.setHeader('Content-Length', upstreamHeaders['content-length'])
   }
   setDshEmbedResponseHeaders(res)
+  if (String(upstreamHeaders['content-type'] || '').toLowerCase().includes('text/html')) {
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'self'; sandbox allow-scripts allow-forms allow-downloads allow-modals allow-popups")
+  }
 }
 
 function proxyDshEmbedHttp(req, res, route, session) {
@@ -11780,19 +11834,37 @@ function proxyDshEmbedHttp(req, res, route, session) {
     let activeUpstream = null
     let clientAborted = false
     let completed = false
+    let untrack = () => {}
 
     const finish = () => {
       if (completed) return
       completed = true
       resolve()
     }
+    const release = () => {
+      untrack()
+      req.removeListener('aborted', close)
+      res.removeListener('close', close)
+      res.removeListener('finish', release)
+    }
+    const close = () => {
+      clientAborted = true
+      activeUpstream?.destroy()
+      if (!res.destroyed) res.destroy()
+      release()
+      finish()
+    }
+    untrack = trackWebEmbedConnection(session, close)
+    req.once('aborted', close)
+    res.once('close', close)
+    res.once('finish', release)
     const fail = error => {
       if (completed || clientAborted) return finish()
       writeDshProxyError(res, 502, `DeepSeek Harness 内嵌代理不可达: ${error?.message || error}`)
       finish()
     }
     const requestAttempt = attempt => {
-      if (completed || clientAborted) return finish()
+      if (completed || clientAborted || session.revoked) return finish()
       let retryHandled = false
       const retry = error => {
         if (retryHandled || completed) return
@@ -11811,6 +11883,7 @@ function proxyDshEmbedHttp(req, res, route, session) {
         agent: _dshProxyAgent,
         headers: { ...dshUpstreamHeaders(req.headers, session.port), ...session.upstreamHeaders },
       }, upstreamRes => {
+        if (completed || clientAborted || session.revoked) { upstreamRes.destroy(); return finish() }
         const contentType = String(upstreamRes.headers['content-type'] || '')
         const rewrite = shouldRewriteDshResponse(contentType, route.upstreamPathname)
         const bufferStatic = retryableStatic && method === 'GET'
@@ -11867,11 +11940,6 @@ function proxyDshEmbedHttp(req, res, route, session) {
       else req.pipe(upstream)
     }
 
-    req.once('aborted', () => {
-      clientAborted = true
-      activeUpstream?.destroy()
-      finish()
-    })
     requestAttempt(1)
   })
 }
@@ -11921,6 +11989,7 @@ export function _handleDshUpgrade(req, socket, head) {
     return true
   }
   const target = net.createConnection(session.port, '127.0.0.1', () => {
+    if (session.revoked) { target.destroy(); socket.destroy(); return }
     const headers = { ...dshUpstreamHeaders(req.headers, session.port, { websocket: true }), ...session.upstreamHeaders }
     const requestLine = `${req.method || 'GET'} ${route.upstreamPath} HTTP/${req.httpVersion || '1.1'}\r\n`
     const headerLines = Object.entries(headers)
@@ -11933,6 +12002,9 @@ export function _handleDshUpgrade(req, socket, head) {
     socket.pipe(target)
     target.pipe(socket)
   })
+  const untrack = trackWebEmbedConnection(session, () => { target.destroy(); socket.destroy() })
+  socket.once('close', () => { untrack(); target.destroy() })
+  target.once('close', () => { if (!socket.destroyed) socket.end() })
   target.once('error', () => {
     if (!socket.destroyed) rejectDshEmbedUpgrade(socket, 502, 'DeepSeek Harness WebSocket 不可达')
   })
@@ -12019,7 +12091,7 @@ function commandAvailable(command) {
       ? ['/D', '/S', '/C', command, '--version']
       : ['--version'], {
       encoding: 'utf8', windowsHide: true, timeout: 5000,
-      env: { ...process.env, PATH: hermesEnhancedPath() },
+      env: { ...process.env, PATH: independentRuntimePath() },
     })
     return probe.status === 0
   } catch {
@@ -12040,7 +12112,7 @@ function dshInstallCommandSpec(runtimeDir, channel = 'stable') {
 function runCaptured(command, args, { timeoutMs = 20 * 60 * 1000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
-      env: { ...process.env, PATH: hermesEnhancedPath() },
+      env: { ...process.env, PATH: independentRuntimePath() },
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -12134,7 +12206,7 @@ function spawnDshWeb(port) {
     detached: true,
     shell,
     cwd: dshRuntimeDir(),
-    env: { ...process.env, PATH: hermesEnhancedPath(), CLAWPANEL_DSH_MANAGED: '1' },
+    env: { ...process.env, PATH: independentRuntimePath(), CLAWPANEL_DSH_MANAGED: '1' },
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -12301,7 +12373,7 @@ function findGlobalOpenCodeCommand() {
   try {
     const found = spawnSync(isWindows ? 'where.exe' : 'which', ['opencode'], {
       encoding: 'utf8', windowsHide: true, timeout: 3000,
-      env: { ...process.env, PATH: hermesEnhancedPath() },
+      env: { ...process.env, PATH: independentRuntimePath() },
     })
     if (found.status !== 0) return ''
     return String(found.stdout || '').split(/\r?\n/).map(value => value.trim()).find(Boolean) || ''
@@ -12374,7 +12446,7 @@ function openCodeRuntimeEnv(password = '') {
   ensureOpenCodeHome()
   return {
     ...process.env,
-    PATH: hermesEnhancedPath(),
+    PATH: independentRuntimePath(),
     OPENCODE_CONFIG: openCodeConfigPath(),
     OPENCODE_CONFIG_DIR: openCodeConfigDir(),
     OPENCODE_SERVER_USERNAME: 'opencode',
@@ -12764,16 +12836,22 @@ function syncOpenCodeProvider(channel, apiKey, setDefault = false) {
 }
 
 function clearOpenCodeEmbedSessions() {
+  for (const session of _openCodeEmbedSessions.values()) closeWebEmbedSession(session)
   _openCodeEmbedSessions.clear()
+  _openCodeProxyAgent.destroy()
 }
 
 function pruneOpenCodeEmbedSessions(now = Date.now()) {
   for (const [token, session] of _openCodeEmbedSessions) {
-    if (now > session.expiresAt || now > session.maxExpiresAt) _openCodeEmbedSessions.delete(token)
+    if (now > session.expiresAt || now > session.maxExpiresAt) {
+      closeWebEmbedSession(session)
+      _openCodeEmbedSessions.delete(token)
+    }
   }
   while (_openCodeEmbedSessions.size > OPENCODE_EMBED_MAX_SESSIONS) {
     const oldest = _openCodeEmbedSessions.keys().next().value
     if (!oldest) break
+    closeWebEmbedSession(_openCodeEmbedSessions.get(oldest))
     _openCodeEmbedSessions.delete(oldest)
   }
 }
@@ -12785,6 +12863,7 @@ function resolveOpenCodeEmbedSession(token) {
   if (!session) return null
   const record = readOpenCodePidRecord()
   if (!record || record.pid !== session.pid || record.port !== session.port || !isManagedOpenCodeProcess(record)) {
+    closeWebEmbedSession(session)
     _openCodeEmbedSessions.delete(token)
     return null
   }
@@ -12792,7 +12871,8 @@ function resolveOpenCodeEmbedSession(token) {
   return session
 }
 
-async function createOpenCodeEmbedSession(portValue = OPENCODE_DEFAULT_PORT) {
+async function createOpenCodeEmbedSession(portValue = OPENCODE_DEFAULT_PORT, storage = {}) {
+  const authGeneration = _webEmbedAuthGeneration
   const port = normalizeOpenCodePort(portValue)
   const status = await openCodeStatus(port)
   const record = readOpenCodePidRecord()
@@ -12806,18 +12886,21 @@ async function createOpenCodeEmbedSession(portValue = OPENCODE_DEFAULT_PORT) {
     pid: record.pid,
     port,
     password: String(record.password || ''),
+    storage: sanitizeOpenCodeStorage(storage),
     createdAt: now,
     expiresAt: now + OPENCODE_EMBED_IDLE_TTL,
     maxExpiresAt: now + OPENCODE_EMBED_MAX_TTL,
   }
+  if (authGeneration !== _webEmbedAuthGeneration) throw Object.assign(new Error('面板认证状态已更新，请重新加载工作台'), { code: 'EMBED_AUTH_CHANGED' })
   _openCodeEmbedSessions.set(token, session)
   pruneOpenCodeEmbedSessions(now)
-  return { src: `${openCodeEmbedPrefix(token)}/`, expiresAt: session.expiresAt, sandboxed: true }
+  return { src: `${openCodeEmbedPrefix(token)}/`, uiSrc: `/?__opencode_embed=${token}`, expiresAt: session.expiresAt, sandboxed: true }
 }
 
 function isOpenCodeEmbedRequest(rawUrl) {
   const pathname = String(rawUrl || '').split('?')[0]
-  return pathname === '/__opencode' || pathname.startsWith('/__opencode/')
+  if (pathname === '/__opencode' || pathname.startsWith('/__opencode/')) return true
+  try { return new URL(String(rawUrl || ''), 'http://clawpanel.local').searchParams.has('__opencode_embed') } catch { return false }
 }
 
 function setOpenCodeEmbedResponseHeaders(res) {
@@ -12854,15 +12937,36 @@ function copyOpenCodeProxyHeaders(upstreamHeaders, res, { rewrite, prefix }) {
   // JSON/二进制等不改写的响应按字节透传，必须保留对应编码头。
   if (!rewrite && upstreamHeaders['content-encoding']) res.setHeader('Content-Encoding', upstreamHeaders['content-encoding'])
   setOpenCodeEmbedResponseHeaders(res)
+  // 能力文档被直接打开时也不能变成面板同源脚本；JSON/静态资产不施加文档 sandbox。
+  if (String(upstreamHeaders['content-type'] || '').toLowerCase().includes('text/html')) {
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'self'; sandbox allow-scripts allow-forms allow-downloads allow-modals allow-popups")
+  }
 }
 
 function proxyOpenCodeEmbedHttp(req, res, route, session) {
   return new Promise(resolve => {
     const method = String(req.method || 'GET').toUpperCase()
     let completed = false
+    let upstream, untrack = () => {}
     const finish = () => { if (!completed) { completed = true; resolve() } }
+    const release = () => {
+      untrack()
+      req.removeListener('aborted', close)
+      res.removeListener('close', close)
+      res.removeListener('finish', release)
+    }
+    const close = () => {
+      upstream?.destroy()
+      if (!res.destroyed) res.destroy()
+      release()
+      finish()
+    }
+    untrack = trackWebEmbedConnection(session, close)
+    req.once('aborted', close)
+    res.once('close', close)
+    res.once('finish', release)
     const headers = openCodeUpstreamHeaders(req.headers, session.port, { password: session.password })
-    const upstream = http.request({
+    upstream = http.request({
       hostname: '127.0.0.1',
       port: session.port,
       path: route.upstreamPath,
@@ -12870,6 +12974,7 @@ function proxyOpenCodeEmbedHttp(req, res, route, session) {
       agent: _openCodeProxyAgent,
       headers,
     }, upstreamRes => {
+      if (completed || session.revoked) { upstreamRes.destroy(); return finish() }
       const contentType = String(upstreamRes.headers['content-type'] || '')
       const rewrite = shouldRewriteOpenCodeResponse(contentType)
       if (!rewrite || method === 'HEAD') {
@@ -12892,7 +12997,7 @@ function proxyOpenCodeEmbedHttp(req, res, route, session) {
         let body
         try {
           const decoded = decodeOpenCodeProxyBody(Buffer.concat(chunks), upstreamRes.headers['content-encoding'])
-          body = Buffer.from(rewriteOpenCodeProxyText(decoded.toString('utf8'), route.prefix, { contentType }), 'utf8')
+          body = Buffer.from(rewriteOpenCodeProxyText(decoded.toString('utf8'), route.prefix, { contentType, storage: session.storage }), 'utf8')
         } catch {
           writeOpenCodeProxyError(res, 502, 'OpenCode 内嵌响应解码失败')
           return finish()
@@ -12909,8 +13014,7 @@ function proxyOpenCodeEmbedHttp(req, res, route, session) {
         finish()
       })
     })
-    upstream.once('error', error => { writeOpenCodeProxyError(res, 502, `OpenCode 内嵌代理不可达: ${error?.message || error}`); finish() })
-    req.once('aborted', () => { upstream.destroy(); finish() })
+    upstream.once('error', error => { if (!completed) writeOpenCodeProxyError(res, 502, `OpenCode 内嵌代理不可达: ${error?.message || error}`); finish() })
     if (method === 'GET' || method === 'HEAD') upstream.end()
     else req.pipe(upstream)
   })
@@ -12943,6 +13047,7 @@ export function _handleOpenCodeUpgrade(req, socket, head) {
   const session = resolveOpenCodeEmbedSession(route.token)
   if (!session) { rejectOpenCodeEmbedUpgrade(socket, 401, 'OpenCode 内嵌会话已失效'); return true }
   const target = net.createConnection(session.port, '127.0.0.1', () => {
+    if (session.revoked) { target.destroy(); socket.destroy(); return }
     const headers = openCodeUpstreamHeaders(req.headers, session.port, { password: session.password, websocket: true })
     const requestLine = `${req.method || 'GET'} ${route.upstreamPath} HTTP/${req.httpVersion || '1.1'}\r\n`
     const headerLines = Object.entries(headers).flatMap(([name, value]) => Array.isArray(value) ? value.map(item => `${name}: ${item}`) : [`${name}: ${value}`]).join('\r\n')
@@ -12951,6 +13056,9 @@ export function _handleOpenCodeUpgrade(req, socket, head) {
     socket.pipe(target)
     target.pipe(socket)
   })
+  const untrack = trackWebEmbedConnection(session, () => { target.destroy(); socket.destroy() })
+  socket.once('close', () => { untrack(); target.destroy() })
+  target.once('close', () => { if (!socket.destroyed) socket.end() })
   target.once('error', () => { if (!socket.destroyed) rejectOpenCodeEmbedUpgrade(socket, 502, 'OpenCode WebSocket 不可达') })
   socket.once('error', () => target.destroy())
   return true
@@ -16112,8 +16220,8 @@ const handlers = {
     return uninstallOpenCode()
   },
 
-  opencode_embed_session({ port = OPENCODE_DEFAULT_PORT } = {}) {
-    return createOpenCodeEmbedSession(port)
+  opencode_embed_session({ port = OPENCODE_DEFAULT_PORT, storage = {} } = {}) {
+    return createOpenCodeEmbedSession(port, storage)
   },
 
   opencode_start({ port = OPENCODE_DEFAULT_PORT } = {}) {
@@ -16608,7 +16716,9 @@ const handlers = {
   },
 
   write_panel_config({ config }) {
+    const previous = readPanelConfig()
     writePanelConfigFile(config)
+    if (webEmbedAuthChanged(previous, readPanelConfig())) revokeWebEmbedCapabilities()
     return true
   },
 
@@ -16803,9 +16913,10 @@ const handlers = {
   auth_set_password({ password }) {
     const cfg = readPanelConfig()
     cfg.accessPassword = password || ''
-    fs.writeFileSync(PANEL_CONFIG_PATH, JSON.stringify(cfg, null, 2))
+    writePanelConfigFile(cfg)
     // 清除所有 session（密码变更后强制重新登录）
     _sessions.clear()
+    revokeWebEmbedCapabilities()
     return true
   },
 
@@ -16894,7 +17005,7 @@ const handlers = {
       const verMatch = r.stdout.split(/\s+/).find(s => /^v?\d/.test(s)) || r.stdout
       result.installed = true
       result.version = verMatch.replace(/^v/, '')
-      result.path = findCommandPath('hermes')
+      result.path = findCommandPath('hermes', buildHermesRuntimeEnv())
     } else {
       result.installed = false; result.version = null; result.path = null
     }
@@ -20013,6 +20124,7 @@ function _initApi() {
   setInterval(() => {
     const now = Date.now()
     pruneDshEmbedSessions(now)
+    pruneOpenCodeEmbedSessions(now)
     for (const [token, session] of _sessions) {
       if (now > session.expires) _sessions.delete(token)
     }
@@ -20411,6 +20523,7 @@ async function _apiMiddleware(req, res, next) {
     fs.writeFileSync(PANEL_CONFIG_PATH, JSON.stringify(cfg, null, 2))
     invalidateConfigCache()
     _sessions.clear()
+    revokeWebEmbedCapabilities()
     const token = crypto.randomUUID()
     _sessions.set(token, { expires: Date.now() + SESSION_TTL })
     res.setHeader('Set-Cookie', `clawpanel_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}`)
@@ -20449,7 +20562,14 @@ async function _apiMiddleware(req, res, next) {
       return
     }
     const args = await readBody(req)
+    if (!isAuthenticated(req)) {
+      res.statusCode = 401
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ error: '未登录' }))
+      return
+    }
     const cfg = readPanelConfig()
+    const previous = { ...cfg }
     if (args.enable) {
       delete cfg.accessPassword
       delete cfg.mustChangePassword
@@ -20460,6 +20580,7 @@ async function _apiMiddleware(req, res, next) {
     }
     fs.writeFileSync(PANEL_CONFIG_PATH, JSON.stringify(cfg, null, 2))
     invalidateConfigCache()
+    if (webEmbedAuthChanged(previous, cfg)) revokeWebEmbedCapabilities()
     res.setHeader('Content-Type', 'application/json')
     res.end(JSON.stringify({ success: true }))
     return
@@ -20467,7 +20588,10 @@ async function _apiMiddleware(req, res, next) {
 
   if (cmd === 'auth_logout') {
     const cookies = parseCookies(req)
+    const session = _sessions.get(cookies.clawpanel_session)
     if (cookies.clawpanel_session) _sessions.delete(cookies.clawpanel_session)
+    // 无密码模式的放行不等于已登录；无效/过期 Cookie 的 logout 不得撤销他人能力。
+    if (session && Date.now() <= session.expires) revokeWebEmbedCapabilities()
     res.setHeader('Set-Cookie', 'clawpanel_session=; Path=/; HttpOnly; Max-Age=0')
     res.setHeader('Content-Type', 'application/json')
     res.end(JSON.stringify({ success: true }))
@@ -20545,13 +20669,22 @@ async function _apiMiddleware(req, res, next) {
   }
 
   try {
+    const authGeneration = _webEmbedAuthGeneration
     const args = await readBody(req)
+    const embedCommand = cmd === 'dsh_embed_session' || cmd === 'opencode_embed_session'
+    if ((embedCommand && authGeneration !== _webEmbedAuthGeneration)
+      || ((embedCommand || cmd === 'auth_set_password' || cmd === 'write_panel_config') && !isAuthenticated(req))) {
+      res.statusCode = 401
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ error: '面板认证状态已更新，请重新登录或刷新工作台' }))
+      return
+    }
     // Hermes 启动/聊天等 handler 会调用同表方法，保持对象方法的 this 绑定。
     const result = await handler.call(handlers, args)
     res.setHeader('Content-Type', 'application/json')
     res.end(JSON.stringify(result))
   } catch (e) {
-    res.statusCode = 500
+    res.statusCode = e.code === 'EMBED_AUTH_CHANGED' ? 401 : 500
     res.setHeader('Content-Type', 'application/json')
     res.end(JSON.stringify({ error: e.message || String(e) }))
   }
@@ -20562,7 +20695,7 @@ export function _isWebSocketAuthorized(req) {
   return isAuthenticated(req)
 }
 
-export { _initApi, _apiMiddleware, nodeVersionSatisfiesRequirement }
+export { _initApi, _apiMiddleware, nodeVersionSatisfiesRequirement, isOpenCodeEmbedRequest, isDshEmbedRequest }
 
 export function devApiPlugin() {
   let _inited = false

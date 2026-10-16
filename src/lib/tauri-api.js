@@ -366,7 +366,7 @@ export const api = {
   openCodeCheckUpdate: () => invoke('opencode_check_update'),
   openCodeUpdate: () => { invalidate('opencode_status'); return invoke('opencode_update') },
   openCodeUninstall: () => { invalidate('opencode_status'); return invoke('opencode_uninstall') },
-  openCodeEmbedSession: (port = 4096) => invoke('opencode_embed_session', { port }),
+  openCodeEmbedSession: (port = 4096, storage = {}) => invoke('opencode_embed_session', { port, storage }),
   openCodeStart: (port = 4096) => { invalidate('opencode_status'); return invoke('opencode_start', { port }) },
   openCodeStop: (port = 4096) => { invalidate('opencode_status'); return invoke('opencode_stop', { port }) },
   openCodeSyncProvider: ({ channelId, setDefault = false }) => {

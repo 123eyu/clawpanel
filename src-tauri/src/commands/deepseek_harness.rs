@@ -13,11 +13,11 @@ use std::time::Duration;
 
 const DSH_PACKAGE_NAME: &str = "@deepseek-ai/dsh";
 const DSH_STABLE_VERSION: &str = "0.2.0-rc.2";
-const DSH_PREVIEW_VERSION: &str = "0.2.1-alpha.2";
+const DSH_PREVIEW_VERSION: &str = "0.2.1-alpha.4";
 const DSH_PACKAGE_VERSION: &str = DSH_STABLE_VERSION;
 const DSH_DEFAULT_PORT: u16 = 3080;
 const DSH_NODE_REQUIREMENT: &str = "^22.19.0 || >=24.0.0";
-const DSH_STABLE_PNPM_VERSION: &str = "11.7.0";
+const DSH_STABLE_PNPM_VERSION: &str = "11.28.5";
 const DSH_PREVIEW_PNPM_VERSION: &str = "11.28.5";
 const DSH_BUILD_PACKAGES: &[&str] = &[
     "@deepseek-ai/dsh-subprocess-local",
