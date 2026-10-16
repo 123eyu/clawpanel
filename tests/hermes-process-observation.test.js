@@ -8,6 +8,17 @@ const source = fs.readFileSync(new URL('../scripts/test-hermes-windows-qualifica
 const privatePs = source.match(/function ps\(code\) \{[\s\S]*?\n\}/)[0]
 const invoke = new Function('spawnSync', 'assert', 'process', `${privatePs}; return ps`)(spawnSync, assert, process)
 
+test('资格工具声明仅在真实VM启用phase诊断，不扩原就绪或CLI预算', () => {
+  const script = new URL('../scripts/test-hermes-windows-qualification.mjs', import.meta.url)
+  const r = spawnSync(process.execPath, [script.pathname.replace(/^\/([A-Za-z]:)/, '$1'), '--plan'], {encoding: 'utf8', windowsHide: true, timeout: 10000})
+  assert.equal(r.status, 0, r.stderr)
+  assert.deepEqual(JSON.parse(r.stdout).startupTiming, {qualifiedVmOnly: true, acceptanceExtension: false})
+  const execute = source.slice(source.indexOf('async function execute('))
+  const enabled = execute.indexOf("env.CLAWPANEL_HERMES_PHASE_TIMING = '1'")
+  assert.ok(enabled > execute.indexOf('validateRunnerProof(proof)') && enabled > execute.indexOf('env = isolationEnv('))
+  assert.ok(enabled < execute.indexOf("write('isolationenv.json'"))
+})
+
 test('Windows PS5 输出在序列化前固定 UTF8，不改变30秒或模块隔离门禁', () => {
   assert.match(privatePs, /\[Console\]::OutputEncoding\s*=\s*(?:New-Object |\[)?(?:System\.)?Text\.UTF8Encoding/)
   assert.match(privatePs, /timeout: 30000/)

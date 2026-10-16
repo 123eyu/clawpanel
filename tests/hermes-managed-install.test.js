@@ -52,7 +52,9 @@ function runPs(body) {
     assert.equal(r.status, 0, `${r.error || ''}\n${r.stdout}\n${r.stderr}`)
     assert.equal(JSON.stringify(process.env), before)
     assert.equal(sha(fs.readFileSync(source)), original, '不得修改原输入字节')
-    return JSON.parse(r.stdout.trim())
+    const result = JSON.parse(r.stdout.trim())
+    const pathReceipts = r.stderr.split(/\r?\n/).filter(line => line.startsWith('CLAWPANEL_UV_PATH_RECEIPT ')).map(line => JSON.parse(line.slice('CLAWPANEL_UV_PATH_RECEIPT '.length)))
+    return pathReceipts.length ? { ...result, pathReceipts } : result
   } finally {
     assert.equal(path.dirname(fs.realpathSync(temp)), fs.realpathSync(os.tmpdir()))
     fs.rmSync(temp, { recursive: true, force: true })
@@ -278,7 +280,10 @@ $all=@(Install-Uv)
 if($script:requests.Count -ne 2){throw "not exactly original bounded two sources: $($script:requests.Count)"}
 if(($all -join '|') -notmatch 'fixture-primary-network-blocked' -or ($all -join '|') -notmatch 'SHA256|size'){throw 'lost original download/hash errors'}
 foreach($request in $script:requests){
-  if($request.timeout -ne 30 -or $request.redirects -ne 5 -or -not $request.out.StartsWith($privateHome + '\\')){throw 'unbounded/outside download'}
+  # PS5 的 GetFullPath 会展开 Node realpathSync 仍保留的 8.3 别名；预期必须遵循同一实际路径契约。
+  $expectedPrefix=[IO.Path]::GetFullPath($privateHome).TrimEnd('\\') + '\\'
+  [Console]::Error.WriteLine('CLAWPANEL_UV_PATH_RECEIPT ' + (@{scope='download';temp=$temp;home=$privateHome;homeFull=[IO.Path]::GetFullPath($privateHome);actual=$request.out;expectedPrefix=$expectedPrefix;timeout=$request.timeout;redirects=$request.redirects}|ConvertTo-Json -Compress))
+  if($request.timeout -ne 30 -or $request.redirects -ne 5 -or -not $request.out.StartsWith($expectedPrefix)){throw 'unbounded/outside download'}
 }
 $cache=Join-Path $privateHome '.cache/clawpanel-installers/uv-0.13.1-f6c934a9926096f957615f9f5276efd3caeab58253eec613963a72d12b380e63.ps1'
 [IO.File]::WriteAllText($cache,'corrupt cache')
@@ -344,7 +349,10 @@ if($before -cne $after){throw 'wrapper process env not restored'}
 $child=$output|Where-Object {$_ -is [string] -and $_.StartsWith('{')}|Select-Object -First 1|ConvertFrom-Json
 if(-not $child -or $child.pid -eq $PID -or $code -ne 7){throw 'sink/exit masked'}
 if($child.argv -notcontains '-NoProfile' -or $child.argv -notcontains '-NonInteractive' -or $child.argv -notcontains '-File' -or $child.argv -contains '-c'){throw 'unsafe argv'}
-if(-not $child.noModify -or $child.flag -ne '1' -or $child.install -ne (Join-Path $privateHome 'bin') -or $child.config -ne (Join-Path $privateHome '.config')){throw 'private env'}
+$expectedInstall=[IO.Path]::GetFullPath((Join-Path $privateHome 'bin'))
+$expectedConfig=[IO.Path]::GetFullPath((Join-Path $privateHome '.config'))
+[Console]::Error.WriteLine('CLAWPANEL_UV_PATH_RECEIPT ' + (@{scope='child-env';temp=$temp;home=$privateHome;homeFull=[IO.Path]::GetFullPath($privateHome);actualInstall=$child.install;expectedInstall=$expectedInstall;actualConfig=$child.config;expectedConfig=$expectedConfig;flag=$child.flag;noModify=$child.noModify}|ConvertTo-Json -Compress))
+if(-not $child.noModify -or $child.flag -ne '1' -or $child.install -ne $expectedInstall -or $child.config -ne $expectedConfig){throw 'private env'}
 if($child.download -or $child.unmanaged -or $child.ci){throw 'inherited redirect env'}
 $outside=Join-Path $temp 'outside bin'
 $null=New-Item -ItemType Directory -Force $outside

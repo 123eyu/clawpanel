@@ -502,6 +502,8 @@ async function execute(o) {
     before = hostSnapshot(proof); write('host-before.json', before)
     home = path.join(output, 'h'); assert.ok(home.length <= 96, 'Windows 私有 HOME 路径过长'); fs.mkdirSync(home)
     env = isolationEnv({ home, temp: path.join(output, 't'), realProfile: proof.actualProfile })
+    // 仅通过真实 VM/SID 资格后启用固定阶段诊断；失败仍按原20秒就绪门禁判红。
+    env.CLAWPANEL_HERMES_PHASE_TIMING = '1'
     for (const key of ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'HERMES_HOME', 'OPENCLAW_CONFIG_DIR', 'UV_PYTHON_INSTALL_DIR', 'UV_CACHE_DIR', 'PLAYWRIGHT_BROWSERS_PATH', 'TEMP']) fs.mkdirSync(physical(env[key]), { recursive: true })
     for (const key of ['GIT_CONFIG_GLOBAL', 'NPM_CONFIG_USERCONFIG', 'NPM_CONFIG_GLOBALCONFIG']) fs.writeFileSync(env[key], '')
     write('isolationenv.json', env)
@@ -654,7 +656,7 @@ async function main() {
   if (o['--verify-linux-evidence']) { assert.ok(exactSha(o['--sha'])); console.log(JSON.stringify(verifyLinuxEvidence(o['--verify-linux-evidence'], o['--sha'], o['--version']))); return 0 }
   if (o['--publish-evidence']) { assert.ok(o['--output'], '公开副本必须指定新 output'); console.log(JSON.stringify(await publishEvidence({ roots: { evidence: path.resolve(o['--publish-evidence']) }, output: o['--output'] }))); return 0 }
   if (o['--execute']) return execute(o)
-  console.log(JSON.stringify({ stages: STAGES, installsOnLocalHost: false, nativeTauriRequiredForFullQualification: true, candidateSecrets: false, retries: 0, usage: '--execute --root candidate --sha <40hex> --version <0.x.y> --variant old|new --output <fresh RUNNER_TEMP/dir>', nativeTauri: 'separate missing gate, not upgraded by external receipt' }))
+  console.log(JSON.stringify({ stages: STAGES, installsOnLocalHost: false, nativeTauriRequiredForFullQualification: true, candidateSecrets: false, retries: 0, startupTiming: { qualifiedVmOnly: true, acceptanceExtension: false }, usage: '--execute --root candidate --sha <40hex> --version <0.x.y> --variant old|new --output <fresh RUNNER_TEMP/dir>', nativeTauri: 'separate missing gate, not upgraded by external receipt' }))
   return 0
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().then(code => { process.exitCode = code }).catch(e => { console.error(e.stack); process.exitCode = 1 })
