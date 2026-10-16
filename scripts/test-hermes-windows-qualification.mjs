@@ -210,6 +210,38 @@ function physical(file) {
 export function resolveQualificationCheckout(file, cwd = process.cwd()) {
   return physical(path.resolve(cwd, file))
 }
+// 只采集本轮测试HOME中的固定运行日志；故障前后分开，不上传整个HOME或缓存。
+export function captureHermesRuntimeLogs(home, output, phase) {
+  assert.ok(['before-stop', 'after-stop'].includes(phase), '未知日志阶段')
+  const source = physical(path.resolve(home, '.hermes')), destination = physical(path.resolve(output, 'runtime-logs', phase))
+  assert.ok(within(path.resolve(home), source) && within(path.resolve(output), destination))
+  assert.ok(!fs.existsSync(destination), '日志阶段输出必须全新'); fs.mkdirSync(destination, { recursive: true })
+  return ['gateway-run.log', 'dashboard-run.log', 'logs/gateway.log', 'logs/errors.log'].map(sourceRelative => {
+    const file = physical(path.join(source, sourceRelative))
+    if (!fs.existsSync(file)) return { sourceRelative, missing: true }
+    assert.ok(fs.lstatSync(file).isFile() && !fs.lstatSync(file).isSymbolicLink(), '运行日志必须是普通文件')
+    const fd = fs.openSync(file, 'r')
+    try {
+      const totalBytes = fs.fstatSync(fd).size, capturedBytes = Math.min(totalBytes, 1024 * 1024)
+      const data = Buffer.alloc(capturedBytes), readBytes = fs.readSync(fd, data, 0, capturedBytes, Math.max(0, totalBytes - capturedBytes))
+      assert.equal(readBytes, capturedBytes, '日志读取过程中发生截断；保留失败')
+      const target = path.join(destination, sourceRelative.replaceAll('/', '_'))
+      fs.writeFileSync(target, data, { mode: 0o600, flag: 'wx' })
+      return { sourceRelative, file: path.relative(output, target), totalBytes, capturedBytes, truncated: totalBytes > capturedBytes, sha256: digest(data) }
+    } finally { fs.closeSync(fd) }
+  })
+}
+// 已经失败后的单次只读观察：保留原红灯，仅区分进程失败与晚就绪，不延长产品启动门禁。
+export async function observeFailedGatewayStartup({ isOpen, readHealth, now = Date.now, pause = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+  const started = now(), r = { scope: 'post-failure-observation-not-acceptance', qualificationPass: false, becameReachable: false, samples: [] }
+  while (now() - started < 20000) {
+    const open = await isOpen(); r.samples.push({ elapsedMs: now() - started, portOpen: open })
+    if (open) { r.becameReachable = true; try { r.health = await readHealth() } catch (error) { r.healthError = String(error) }; break }
+    await pause(Math.min(500, 20000 - (now() - started)))
+  }
+  r.elapsedMs = now() - started
+  return r
+}
 function ps(code) {
   // Windows PowerShell 5.1 自行建立模块路径，不继承 PS7 的不兼容模块；仅改子环境副本。
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'))
@@ -574,8 +606,16 @@ async function execute(o) {
     const preserve = async () => { assert.equal(hash(sentinel), sentinelHash); assert.ok(fs.readFileSync(path.join(env.HERMES_HOME, 'config.yaml'), 'utf8').includes(`qualification_marker: ${o['--sha']}`)); assert.ok((await api('hermes_profiles_list')).profiles.some(p => p.name === 'default')); assert.equal((await api('hermes_read_config')).model_raw, 'qualification-two'); return history() }
     await stage('update-stop', async () => { await stopRuntime(); markInstall(); await api('update_hermes', {}, 900000); await completion(); await preserve(); return { productionStop: true, updateVerified: true } })
     await stage('uninstall-reinstall-preserve', async () => { await api('uninstall_hermes', { cleanConfig: false }); assert.equal((await api('check_hermes')).installed, false); assert.equal(hash(sentinel), sentinelHash); markInstall(); await api('install_hermes', { method: 'uv-tool' }, 900000); await completion(); await preserve(); stopped = false; await api('hermes_gateway_action', { action: 'start' }); await api('hermes_health_check'); assert.equal((await api('hermes_dashboard_start')).started, true); await capturePids(); await stopRuntime(); return { cleanConfig: false, actualHistoryReRead: true, memoryHash: sentinelHash, reinstalled: true, restartedAndStopped: true } })
-  } catch (e) { r.error = e.stack; }
+  } catch (e) {
+    r.error = e.stack;
+    if (env && runtimePort && /Gateway 启动后端口未就绪/.test(r.error)) {
+      try { r.failedStartupObservation = await observeFailedGatewayStartup({ isOpen: () => reachable(runtimePort), readHealth: () => api('hermes_health_check', {}, 10000) }); write('failed-startup-observation.json', r.failedStartupObservation) }
+      catch (error) { r.failedStartupObservationError = String(error) }
+    }
+  }
   finally {
+    if (home) { try { r.runtimeLogs = { beforeStop: captureHermesRuntimeLogs(home, output, 'before-stop') } } catch (e) { r.cleanupError = `故障运行日志留证失败: ${e.message}` } }
+    if (env && !stopped) { try { await capturePids() } catch (e) { r.cleanupError = `停止前真实运行进程未取得完整观察: ${e.message}` } }
     try { if (browser) { if (context) await context.tracing.stop({ path: path.join(output, 'failed-trace.zip') }); await browser.close() } } catch (e) { r.browserCleanupError = String(e) }
     try { await stopRuntime() } catch (e) { r.stopError = String(e) }
     // HTTP 安装超时也保留未退出的真实阶段 PID；只清理本观察器亲自记录且尚无 close 的子进程。
@@ -598,6 +638,7 @@ async function execute(o) {
     if (r.distHashes) { r.distDrift = Object.keys(r.distHashes).filter(f => !fs.existsSync(path.join(project, f)) || hash(path.join(project, f)) !== r.distHashes[f]); if (r.distDrift.length) r.error = 'dist 发生漂移' }
     if (r.toolingDependencies) { r.toolingDrift = Object.keys(r.toolingDependencies).filter(f => !fs.existsSync(path.join(tooling, f)) || hash(path.join(tooling, f)) !== r.toolingDependencies[f]); if (r.toolingDrift.length) r.error = '可信 tooling 发生漂移' }
     if (env) { for (const name of ['gateway-run.log', 'dashboard-run.log']) { const f = path.join(env.HERMES_HOME, name); if (fs.existsSync(f)) fs.copyFileSync(f, path.join(output, name)) } }
+    if (home) { try { r.runtimeLogs ||= {}; r.runtimeLogs.afterStop = captureHermesRuntimeLogs(home, output, 'after-stop') } catch (e) { r.cleanupError = `停止后运行日志留证失败: ${e.message}` } }
     r.status = r.error || r.stopError || r.browserCleanupError || r.cleanupError || r.providerError ? 'failed' : qualificationStatus(r); r.finishedAt = new Date().toISOString(); save()
   }
   console.log(JSON.stringify({ status: r.status, candidateSha: r.candidateSha, output, nativeTauri: 'not-run' }))
