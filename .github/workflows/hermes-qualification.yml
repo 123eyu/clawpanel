@@ -28,7 +28,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: hermes-qualification-manual
+  # 各平台是独立一次性 VM；只读资格可并行，同平台仍串行，维护/发布独占收据不变。
+  group: hermes-qualification-${{ inputs.platform }}
   cancel-in-progress: false
 
 jobs:

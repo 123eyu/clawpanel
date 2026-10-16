@@ -11,10 +11,11 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 const script = path.join(root, 'scripts/test-hermes-windows-qualification.mjs')
 const load = () => import('../scripts/test-hermes-windows-qualification.mjs')
 
-test('新旧 Windows 各自一次性 VM 有界并行，单 run 互斥及私有 HOME 保留', () => {
+test('新旧 Windows 各自一次性 VM 有界并行，同平台 run 互斥及私有 HOME 保留', () => {
   const w = YAML.parse(fs.readFileSync(path.join(root, '.github/workflows/hermes-qualification.yml'), 'utf8'))
   assert.equal(w.jobs.qualify.strategy['max-parallel'], 2)
   assert.equal(w.concurrency['cancel-in-progress'], false)
+  assert.equal(w.concurrency.group, 'hermes-qualification-${{ inputs.platform }}')
   assert.equal(w.jobs.qualify['runs-on'], 'windows-2025')
   assert.match(JSON.stringify(w.jobs.qualify.steps), /hermes-qualification-.*VARIANT/)
 })
@@ -345,7 +346,7 @@ test('hostSnapshot UTF8 哈希命令使用唯一名称，不删 h alias，保留
   for (const canary of ['HKCU:', 'HKLM:', 'Environment', 'Command Processor', 'DoNotExpandEnvironmentNames', 'GetValueKind', 'Get-FileHash', 'Get-ExecutionPolicy -List', 'registry=$registry;shells=$shells;launchers=$launchers;executionPolicy=', 'parentEnvSha256']) assert.ok(source.includes(canary), canary)
 })
 
-test('独立 Windows PowerShell canary 复现 H alias 抢占；真实 hash 函数正确且不改 alias', { skip: process.platform !== 'win32' }, async () => {
+test('独立 Windows PowerShell canary 复现 H alias 抢占；UTF8/file hash 正确且子环境模块隔离', { skip: process.platform !== 'win32' }, async () => {
   const { hostSnapshot } = await load(), { createHash } = await import('node:crypto')
   const definition = hostSnapshot.toString().match(/^function ([\w-]+)\(\$s\).*$/m)
   assert.ok(definition)
@@ -363,4 +364,38 @@ test('独立 Windows PowerShell canary 复现 H alias 抢占；真实 hash 函�
   const actual = run(`$ErrorActionPreference='Stop'\n${definition[0]}\n$aliasBefore=(Get-Alias -Name h).Definition;$values=ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${input}')));$hashes=@(foreach($v in $values){${definition[1]} (ConvertTo-Json -InputObject $v -Compress)});@{aliasBefore=$aliasBefore;aliasAfter=(Get-Alias -Name h).Definition;commandType=(Get-Command ${definition[1]}).CommandType.ToString();hashes=$hashes}|ConvertTo-Json -Compress`)
   assert.equal(actual.aliasBefore, 'Get-History'); assert.equal(actual.aliasAfter, 'Get-History'); assert.equal(actual.commandType, 'Function')
   assert.deepEqual(actual.hashes, values.map(value => createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex')))
+  const base = fs.realpathSync(os.tmpdir()), tmp = fs.mkdtempSync(path.join(base, 'hermes-ps-module-canary-')), file = path.join(tmp, 'bytes.bin')
+  try {
+    const bytes = Buffer.from([0, 13, 10, 255, 0xc3, 0xa9, 10]); fs.writeFileSync(file, bytes)
+    const input = Buffer.from(file).toString('base64'), parentBefore = Object.entries(process.env)
+    const code = `$ErrorActionPreference='Stop';$f=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${input}'));@{sha256=(Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash.ToLowerInvariant();version=$PSVersionTable.PSVersion.Major;module=(Get-Command Get-FileHash).Module.Path}|ConvertTo-Json -Compress`
+    assert.doesNotMatch(code, /HKCU|HKLM|hostSnapshot|Set-ExecutionPolicy|Set-Item/)
+    const pwsh = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 30000 })
+    assert.equal(pwsh.status, 0, pwsh.stderr)
+    const core = JSON.parse(pwsh.stdout.replace(/^\uFEFF/, '')); assert.equal(core.version, 7)
+    const privatePs = fs.readFileSync(script, 'utf8').match(/function ps\(code\) \{[\s\S]*?\n\}/)[0]
+    // 给真实私有 ps() 注入含 PS7 模块目录的父环境副本，不改本进程环境、不执行真实 snapshot。
+    const parent = { env: { ...process.env, PSModulePath: path.dirname(path.dirname(core.module)) } }
+    const invoke = new Function('spawnSync', 'assert', 'process', `${privatePs}; return ps`)(spawnSync, assert, parent)
+    const desktop = invoke(code), expected = createHash('sha256').update(bytes).digest('hex')
+    assert.equal(core.sha256, expected); assert.equal(desktop.sha256, expected); assert.equal(desktop.version, 5)
+    assert.match(desktop.module, /WindowsPowerShell[\\/]v1\.0[\\/]Modules[\\/]Microsoft\.PowerShell\.Utility/i)
+    assert.deepEqual(Object.entries(process.env), parentBefore)
+  } finally {
+    assert.equal(path.dirname(fs.realpathSync(tmp)), base)
+    fs.unlinkSync(file); fs.rmdirSync(tmp)
+  }
+})
+
+test('私有 ps() 只从子环境副本移除全部大小写 PSModulePath，其余父环境原样保留', () => {
+  const source = fs.readFileSync(script, 'utf8').match(/function ps\(code\) \{[\s\S]*?\n\}/)[0]
+  for (const moduleKeys of [{}, { PSModulePath: 'core-only-modules' }, { PSModulePath: 'core', psmodulepath: 'other', PsMoDuLePaTh: 'mixed' }]) {
+    const env = Object.freeze({ PATH: 'unchanged-path', HOME: 'unchanged-home', QUALIFICATION_CANARY: 'same', ...moduleKeys }), before = Object.entries(env), calls = []
+    const invoke = new Function('spawnSync', 'assert', 'process', `${source}; return ps`)((exe, args, options) => { calls.push({ exe, args, options }); return { status: 0, stdout: '{"ok":true}', stderr: '' } }, assert, { env })
+    assert.deepEqual(invoke('only-canary'), { ok: true }); assert.equal(calls.length, 1)
+    const { exe, args, options } = calls[0]; assert.equal(exe, 'powershell.exe'); assert.ok(args.includes('-NoProfile'))
+    assert.notEqual(options.env, env, '必须显式传子环境副本，不能继承跨版本模块目录')
+    assert.deepEqual(options.env, { PATH: 'unchanged-path', HOME: 'unchanged-home', QUALIFICATION_CANARY: 'same' })
+    assert.deepEqual(Object.entries(env), before); assert.equal(options.timeout, 30000)
+  }
 })
