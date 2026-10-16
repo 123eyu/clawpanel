@@ -213,8 +213,19 @@ export function resolveQualificationCheckout(file, cwd = process.cwd()) {
 function ps(code) {
   // Windows PowerShell 5.1 自行建立模块路径，不继承 PS7 的不兼容模块；仅改子环境副本。
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'))
+  const started = Date.now()
   const r = spawnSync('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { env, encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })
-  assert.equal(r.status, 0, r.stderr); return JSON.parse(r.stdout.replace(/^\uFEFF/, ''))
+  const phaseTimings = []
+  for (const match of (r.stderr || '').matchAll(/CLAWPANEL_HOST_PHASE (\{[^\r\n]*\})/g)) {
+    try {
+      const p = JSON.parse(match[1])
+      if (phaseTimings.length < 6 && ['init', 'registry', 'shells', 'launchers', 'execution-policy', 'complete'].includes(p.phase) && Number.isSafeInteger(p.elapsedMs) && p.elapsedMs >= 0) phaseTimings.push({ phase: p.phase, elapsedMs: p.elapsedMs })
+    } catch { /* 诊断解析失败不伪造 canary 成功；原退出码仍严格判断。 */ }
+  }
+  // 只输出固定白名单字段，不输出命令、环境或 registry 值；时间线不进入宿主指纹。
+  const diagnostic = 'CLAWPANEL_PS_DIAGNOSTICS ' + JSON.stringify({ status: r.status ?? null, signal: r.signal ?? null, errorCode: r.error?.code ?? null, elapsedMs: Date.now() - started, phaseTimings })
+  if (r.status !== 0 || phaseTimings.length) console.error(diagnostic)
+  assert.equal(r.status, 0, `${diagnostic}\n${r.stderr || ''}`); return JSON.parse(r.stdout.replace(/^\uFEFF/, ''))
 }
 export function actualRunnerProof() {
   assert.ok(process.platform === 'win32' && process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted', 'Windows 资格门禁：本机/自托管不启动候选')
@@ -302,14 +313,23 @@ export function hostSnapshot(proof) {
   const data = ps(`
 $ErrorActionPreference='Stop'
 function Get-ClawPanelUtf8Sha256($s){$h=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($h.ComputeHash([Text.Encoding]::UTF8.GetBytes($s)))).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
+$hostClock=[Diagnostics.Stopwatch]::StartNew()
+function Write-ClawPanelHostPhase($phase){[Console]::Error.WriteLine('CLAWPANEL_HOST_PHASE {"phase":"'+$phase+'","elapsedMs":'+$hostClock.ElapsedMilliseconds+'}')}
+Write-ClawPanelHostPhase 'init'
 ${windowsPathFingerprintSource()}
+Write-ClawPanelHostPhase 'registry'
 $registry=@();foreach($p in @('HKCU:\\Environment','HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment','HKCU:\\Software\\Microsoft\\Command Processor')){if(Test-Path -LiteralPath $p){$k=Get-Item -LiteralPath $p;foreach($n in ($k.GetValueNames()|Sort-Object)){$v=$k.GetValue($n,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);$registry+=@{hive=$p;name=$n;kind=$k.GetValueKind($n).ToString();sha256=(Get-ClawPanelUtf8Sha256 (ConvertTo-Json -InputObject $v -Compress))}}}else{$registry+=@{hive=$p;absent=$true}}}
+Write-ClawPanelHostPhase 'shells'
 $real=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${profile64}'))
 $shells=@();$paths=@($PROFILE.AllUsersAllHosts,$PROFILE.AllUsersCurrentHost,$PROFILE.CurrentUserAllHosts,$PROFILE.CurrentUserCurrentHost,"$real\\.bashrc","$real\\.bash_profile","$real\\.profile","$real\\.zshrc","$real\\Documents\\PowerShell\\profile.ps1","$real\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1")
 foreach($p in ($paths|Sort-Object -Unique)){$fingerprint=Get-ClawPanelPathFingerprint $p;$shells+=@{path=$p;exists=($fingerprint.kind -ne 'absent');sha256=$fingerprint.sha256;fingerprint=$fingerprint}}
+Write-ClawPanelHostPhase 'launchers'
 $launchers=@();$dirs=@(($env:PATH -split ';')+@("$real\\AppData\\Roaming\\npm","$real\\.local\\bin","$real\\.hermes\\bin"))|Sort-Object -Unique
 foreach($d in $dirs){if($d -and (Test-Path -LiteralPath $d)){foreach($f in (Get-ChildItem -LiteralPath $d -File -ErrorAction Stop|Where-Object {$_.Name -match '^(hermes|uv|node|npm|python|git)([.-].*|[0-9.]*\\.exe|\\.cmd|\\.ps1)?$'}|Sort-Object FullName)){$fingerprint=Get-ClawPanelPathFingerprint $f.FullName;$launchers+=@{path=$f.FullName;bytes=$f.Length;sha256=$fingerprint.sha256;fingerprint=$fingerprint}}}}
-@{registry=$registry;shells=$shells;launchers=$launchers;executionPolicy=@(Get-ExecutionPolicy -List|ForEach-Object {@{scope=$_.Scope.ToString();value=$_.ExecutionPolicy.ToString()}})}|ConvertTo-Json -Depth 7`)
+Write-ClawPanelHostPhase 'execution-policy'
+$executionPolicy=@(Get-ExecutionPolicy -List|ForEach-Object {@{scope=$_.Scope.ToString();value=$_.ExecutionPolicy.ToString()}})
+Write-ClawPanelHostPhase 'complete'
+@{registry=$registry;shells=$shells;launchers=$launchers;executionPolicy=$executionPolicy}|ConvertTo-Json -Depth 7`)
   return { ...data, parentEnvSha256: digest(JSON.stringify(Object.entries(process.env).sort())) }
 }
 

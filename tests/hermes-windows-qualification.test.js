@@ -401,6 +401,13 @@ test('独立 Windows PowerShell canary 复现 H alias 抢占；UTF8/file hash �
     assert.equal(typed.b.Target, 'C:\\qualification\\two.exe'); assert.notEqual(typed.a.DataSha256, typed.b.DataSha256)
     assert.equal(typed.a.DataSha256, createHash('sha256').update(a).digest('hex')); assert.deepEqual(typed.bad, [true, true, true, true])
     assert.match(typed.readError, /FileReadError|IOException|UnauthorizedAccess/, '不可读普通文件必须失败，不能记录 null hash 后视为 unchanged')
+    const snapshotSource = q.hostSnapshot.toString(), phaseDefinition = snapshotSource.match(/^function Write-ClawPanelHostPhase.*$/m)
+    assert.ok(phaseDefinition, '真实 canary 需要有限 phase 时间线')
+    const messages = [], phasePs = new Function('spawnSync', 'assert', 'process', 'console', `${privatePs}; return ps`)(spawnSync, assert, parent, { error: line => messages.push(line) })
+    const phaseResult = phasePs(`$ErrorActionPreference='Stop';$hostClock=[Diagnostics.Stopwatch]::StartNew()\n${phaseDefinition[0]}\nWrite-ClawPanelHostPhase 'init'\nWrite-ClawPanelHostPhase 'complete'\n'{"ok":true}'`)
+    assert.deepEqual(phaseResult, { ok: true }, 'diagnostics 不污染 stdout JSON 或参与宿主 before/after 比较')
+    const diagnostic = JSON.parse(messages.at(-1).replace(/^CLAWPANEL_PS_DIAGNOSTICS /, ''))
+    assert.deepEqual(diagnostic.phaseTimings.map(p => p.phase), ['init', 'complete']); assert.ok(diagnostic.phaseTimings.every(p => Number.isSafeInteger(p.elapsedMs) && p.elapsedMs >= 0))
   } finally {
     assert.equal(path.dirname(fs.realpathSync(tmp)), base)
     fs.unlinkSync(file); fs.rmdirSync(tmp)
@@ -436,4 +443,26 @@ test('typed reparse 的 tag/target/metadata hash 或类型变化均失败，不�
   const before = { launchers: [{ path: 'WindowsApps/python.exe', bytes: 0, sha256: null, fingerprint }] }
   assert.doesNotThrow(() => assertHostUnchanged(before, structuredClone(before)))
   for (const patch of [{ reparseTag: '0xa000000c' }, { target: 'C:\\qualification\\two.exe' }, { metadataSha256: 'b'.repeat(64) }, { kind: 'file' }]) assert.throws(() => assertHostUnchanged(before, { launchers: [{ ...before.launchers[0], fingerprint: { ...fingerprint, ...patch } }] }), /宿主/)
+})
+
+test('ps timeout 保留 status/signal/error.code 与有限 phase，不放宽30000或泄漏新诊断字段', () => {
+  const source = fs.readFileSync(script, 'utf8').match(/function ps\(code\) \{[\s\S]*?\n\}/)[0], logs = [], calls = []
+  const stderr = '#< CLIXML\nCLAWPANEL_HOST_PHASE {"phase":"init","elapsedMs":0}\nCLAWPANEL_HOST_PHASE {"phase":"launchers","elapsedMs":12000,"ignored":"not-a-diagnostic-field"}\nCLAWPANEL_HOST_PHASE {"phase":"unknown","elapsedMs":1}\n'
+  const invoke = new Function('spawnSync', 'assert', 'process', 'console', `${source}; return ps`)((exe, args, options) => { calls.push(options); return { status: null, signal: 'SIGTERM', error: { code: 'ETIMEDOUT' }, stdout: '', stderr } }, assert, { env: Object.freeze({ PATH: 'unchanged' }) }, { error: line => logs.push(line) })
+  assert.throws(() => invoke('only-canary'), error => /"errorCode":"ETIMEDOUT"/.test(error.message) && /"status":null/.test(error.message) && /"phase":"launchers"/.test(error.message))
+  assert.equal(calls.length, 1); assert.equal(calls[0].timeout, 30000)
+  assert.equal(logs.length, 1)
+  const report = JSON.parse(logs[0].replace(/^CLAWPANEL_PS_DIAGNOSTICS /, ''))
+  assert.deepEqual(Object.keys(report).sort(), ['elapsedMs', 'errorCode', 'phaseTimings', 'signal', 'status'].sort())
+  assert.equal(report.signal, 'SIGTERM'); assert.equal(report.errorCode, 'ETIMEDOUT')
+  assert.deepEqual(report.phaseTimings, [{ phase: 'init', elapsedMs: 0 }, { phase: 'launchers', elapsedMs: 12000 }])
+  assert.doesNotMatch(logs[0], /ignored|not-a-diagnostic-field|only-canary|unchanged/)
+})
+
+test('hostSnapshot 六个有限阶段只写 stderr，不给 before/after canary 增加时变字段', async () => {
+  const { hostSnapshot } = await load(), source = hostSnapshot.toString()
+  const phases = [...source.matchAll(/Write-ClawPanelHostPhase '([^']+)'/g)].map(m => m[1])
+  assert.deepEqual(phases, ['init', 'registry', 'shells', 'launchers', 'execution-policy', 'complete'])
+  assert.match(source, /\[Console\]::Error\.WriteLine/); assert.match(source, /executionPolicy=\$executionPolicy/)
+  assert.doesNotMatch(source.slice(source.indexOf('@{registry=$registry')), /phaseTimings|hostClock|elapsedMs/)
 })

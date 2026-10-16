@@ -375,7 +375,7 @@ export async function main(argv = process.argv.slice(2)) {
           req.on('data', chunk => { if (requestBody.length < 4096) requestBody += chunk })
           req.on('end', () => { try { const body = JSON.parse(requestBody); if (['start', 'stop'].includes(body.action)) { assert.equal(pendingAction, undefined, '不并发启动/停止'); pendingAction = { action: body.action, started: Date.now() }; actionEpoch++ } } catch (error) { rawError(error); failed = true } })
         }
-        const upstream = http.request({ host: '127.0.0.1', port: webPort, path: req.url, method: req.method, headers: { ...req.headers, host: `127.0.0.1:${webPort}` } }, response => {
+        const upstream = http.request({ host: '127.0.0.1', port: webPort, path: req.url, method: req.method, agent: false, headers: { ...req.headers, host: `127.0.0.1:${webPort}` } }, response => {
           if (observe) {
             response.on('data', chunk => { if (responseBody.length < 65536) responseBody += chunk })
             response.on('end', () => {

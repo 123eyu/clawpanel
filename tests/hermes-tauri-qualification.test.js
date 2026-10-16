@@ -296,7 +296,8 @@ test('兼容独立门禁：缺seed/偷调installer/少UI/升级旧source均红�
 test('兼容新source读取绑定实际Git blob与build manifest，篡改源码或EXE先红', async () => {
   const { readNativeCompatibilityBinding } = await load()
   assert.equal(typeof readNativeCompatibilityBinding, 'function')
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-native-compat-source-'))
+  // macOS 的 /var 临时根本身是链接；fixture 先选物理根，不放松产品拒绝链接的门禁。
+  const base = fs.realpathSync(os.tmpdir()), dir = fs.mkdtempSync(path.join(base, 'hermes-native-compat-source-'))
   try {
     const git = args => { const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim() }
     git(['init', '-q']); git(['config', 'user.email', 'fixture@example.invalid']); git(['config', 'user.name', 'fixture'])
@@ -312,7 +313,8 @@ test('兼容新source读取绑定实际Git blob与build manifest，篡改源码�
     fs.appendFileSync(app, 'changed'); assert.throws(() => readNativeCompatibilityBinding({ root: dir, app, sha, buildReceipt: receipt })); fs.writeFileSync(app, 'fixture exe')
     fs.appendFileSync(path.join(dir, files[0]), 'changed'); assert.throws(() => readNativeCompatibilityBinding({ root: dir, app, sha, buildReceipt: receipt }))
   } finally {
-    assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(dir).startsWith('hermes-native-compat-source-'), '只清理本测试独占临时目录')
+    const relative = path.relative(base, fs.realpathSync(dir))
+    assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative) && path.basename(dir).startsWith('hermes-native-compat-source-'), '只清理本测试独占临时目录')
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
