@@ -8,6 +8,7 @@ import net from 'node:net'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
+import { isManagedRenamedPiProcess } from './maintenance-pi-process.mjs'
 import { OPENCLAW_PROTOCOL_RANGE, buildDeviceAuthPayloadV3, resolveConnectSignedAt } from '../src/lib/openclaw-gateway-compat.js'
 const toolingRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const engines = ['pi', 'opencode', 'deepseek-harness', 'hermes', 'openclaw', 'openclaw-zh', 'weixin', 'deepseek-harness-preview']
@@ -143,6 +144,7 @@ function validateCandidate() {
   assert.match(hermesRelease.installerSha256, /^[a-f0-9]{64}$/)
   report.versions = { panel: pkg.version, pi: PI_PACKAGE_VERSION, opencode: OPENCODE_PACKAGE_VERSION, dsh: DSH_PACKAGE_VERSION, openclaw: policy.default.official.recommended, 'openclaw-zh': policy.default.chinese.recommended }
   report.environment.verifierSha256 = crypto.createHash('sha256').update(fs.readFileSync(fileURLToPath(import.meta.url))).digest('hex')
+  report.environment.verifierDependencyHashes = Object.fromEntries(['scripts/maintenance-pi-process.mjs'].map(file => [file, crypto.createHash('sha256').update(fs.readFileSync(path.join(toolingRoot, file))).digest('hex')]))
   report.environment.candidateSourceHashes = Object.fromEntries(['scripts/serve.js', 'scripts/dev-api.js', 'scripts/pi-models.js', 'scripts/opencode.js', 'scripts/deepseek-harness.js', 'package.json', 'package-lock.json', 'openclaw-version-policy.json'].map(file => [file, crypto.createHash('sha256').update(fs.readFileSync(path.join(project, file))).digest('hex')]))
   return { packageName: pkg.name, versions: report.versions, candidateRoot: project, verifier: fileURLToPath(import.meta.url) }
 }
@@ -253,7 +255,16 @@ async function rememberPiPids() {
     values = Array.isArray(parsed) ? parsed : [parsed]
   } else if (process.platform === 'linux') {
     values = fs.readFileSync(`/proc/${web.pid}/task/${web.pid}/children`, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number)
-    values = values.filter(pid => { try { const args = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'); return args.includes(entry) && args.includes('--mode') && args.includes('rpc') } catch { return false } })
+    values = values.filter(pid => {
+      try {
+        const args = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+        if (args.includes(entry) && args.includes('--mode') && args.includes('rpc')) return true
+        // 新 Pi 把 argv 改成 pi，额外检查全部归属，避免把无关 Node 子进程计入停止验收。
+        const parentPid = Number(fs.readFileSync(`/proc/${pid}/status`, 'utf8').match(/^PPid:\s+(\d+)$/m)?.[1])
+        const agentPath = fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').find(value => value.startsWith('PI_CODING_AGENT_DIR='))?.slice('PI_CODING_AGENT_DIR='.length)
+        return isManagedRenamedPiProcess({ pid, parentPid, command: args, executable: fs.realpathSync(`/proc/${pid}/exe`), workspace: fs.realpathSync(`/proc/${pid}/cwd`), agentPath }, { parentPid: web.pid, nodePath: fs.realpathSync(process.execPath), workspace: fs.realpathSync(workspace), agentPath: path.join(configDir, 'clawpanel', 'pi', 'agent') })
+      } catch { return false }
+    })
   } else {
     const text = await command('pgrep', ['-P', String(web.pid)], { timeout: 10000 })
     values = text.trim().split(/\s+/).filter(Boolean).map(Number)
