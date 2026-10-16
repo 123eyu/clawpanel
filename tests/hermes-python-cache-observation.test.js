@@ -12,16 +12,16 @@ const moduleUrl = new URL('../scripts/hermes-python-cache-observation.mjs', impo
 const load = () => import(moduleUrl.href)
 
 function fixture(t) {
-  // macOS /var 是系统链接；临时样本本身从真实物理目录创建，不放松观察器守卫。
-  const parent = fs.realpathSync(os.tmpdir())
-  const root = fs.mkdtempSync(path.join(parent, 'hermes-pyc-observer-'))
+  // macOS /var 和 Windows RUNNER~1 都先归一化；普通 realpath 在 Windows 会保留 8.3 别名。
+  const parent = fs.realpathSync.native(os.tmpdir())
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(parent, 'hermes-pyc-observer-')))
   const home = path.join(root, 'h')
   const site = path.join(home, '.hermes', 'runtime', 'Lib', 'site-packages')
   const modulePath = path.join(site, 'fastapi', '__init__.py')
   fs.mkdirSync(path.dirname(modulePath), { recursive: true })
   fs.writeFileSync(modulePath, 'SOURCE_CONTENT_MUST_NOT_BE_READ')
   t.after(() => {
-    assert.equal(path.dirname(fs.realpathSync(root)), parent)
+    assert.equal(path.dirname(fs.realpathSync.native(root)), parent)
     fs.rmSync(root, { recursive: true, force: true })
   })
   const put = (relative, content = 'PRIVATE_CONTENT_MUST_NOT_BE_READ') => {
@@ -40,6 +40,13 @@ function nonQualifying(r) {
   assert.equal(r.cacheTagsSource, 'filenames-only-not-interpreter-cache-tag')
   assert.notEqual(r.status, 'passed')
 }
+
+test('临时样本向观察器提供 native 物理路径，不保留 Windows 8.3 祖先别名', t => {
+  const f = fixture(t)
+  for (const file of [f.root, f.home, f.modulePath]) {
+    assert.equal(path.relative(fs.realpathSync.native(file), file), '', 'fixture 必须与观察器使用相同的 native 物理路径')
+  }
+})
 
 test('真实私有目录聚合 py/pyc，tag 仅来自缓存文件名，不泄漏文件列表或源码', async t => {
   const f = fixture(t)
