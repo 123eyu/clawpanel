@@ -368,9 +368,49 @@ Write-ClawPanelHostPhase 'complete'
   return { ...data, parentEnvSha256: digest(JSON.stringify(Object.entries(process.env).sort())) }
 }
 
+// 派生记录只保留固定诊断字段；用于区分脚本前、reexec 与 main 后的未覆盖耗时。
+export function createHermesPhaseReceiver(fs, file, childPid, observerPid, enabled) {
+  if (!enabled || !Number.isSafeInteger(childPid) || childPid < 1) return () => {}
+  const labels = new Set(['entry', 'src_b', 'src_e', 'store', 'reexec', 'imp_b', 'imp_e', 'cur_b', 'cur_e', 'debt1_b', 'debt1_e', 'act_b', 'act_e', 'state1_b', 'state1_e', 'prof_b', 'prof_e', 'boot_b', 'boot_e', 'state2_b', 'state2_e', 'debt2_b', 'debt2_e', 'policy_b', 'policy_e', 'preflight', 'main_b', 'main_exit', 'pyjson_b', 'pyjson_e', 'meta_b', 'meta_e'])
+  const keys = ['schemaVersion', 'scope', 'phase', 'pid', 'ppid', 'sequence', 'elapsedMs', 'deltaMs']
+  const decoder = new TextDecoder('utf-8'), started = process.hrtime.bigint(), streams = new Map()
+  let buffered = '', dropping = false, bytes = 0, written = 0
+  return chunk => {
+    if (written >= 64 || bytes >= 131072) return
+    try {
+      // 是收完本 chunk 的观察时刻，不伪称 Python 发射时刻；同 chunk 共享锚点。
+      const observedAt = new Date().toISOString(), spawnElapsedMs = Number(process.hrtime.bigint() - started) / 1e6
+      bytes += chunk.byteLength
+      if (bytes > 131072) return
+      const fragments = decoder.decode(chunk, { stream: true }).split('\n')
+      for (let index = 0; index < fragments.length && written < 64; index++) {
+        const complete = index < fragments.length - 1
+        if (dropping) { if (complete) dropping = false; continue }
+        buffered += fragments[index]
+        if (buffered.length > 4096) { buffered = ''; dropping = !complete; continue }
+        if (!complete) continue
+        const line = buffered.replace(/\r$/, ''); buffered = ''
+        if (!line.startsWith('CLAWPANEL_HERMES_PHASE ')) continue
+        try {
+          const phase = JSON.parse(line.slice('CLAWPANEL_HERMES_PHASE '.length))
+          if (!phase || Array.isArray(phase) || Object.keys(phase).length !== keys.length || !keys.every(key => Object.hasOwn(phase, key))) continue
+          if (phase.schemaVersion !== 1 || !['launch', 'metadata'].includes(phase.scope) || !labels.has(phase.phase)) continue
+          if (!Number.isSafeInteger(phase.pid) || phase.pid < 1 || !Number.isSafeInteger(phase.ppid) || phase.ppid < 0 || !Number.isSafeInteger(phase.sequence) || phase.sequence < 1) continue
+          if (![phase.elapsedMs, phase.deltaMs].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1e12) || phase.deltaMs > phase.elapsedMs) continue
+          const previous = streams.get(phase.pid)
+          if ((!previous && streams.size >= 8) || (previous && (phase.sequence <= previous.sequence || phase.elapsedMs < previous.elapsedMs))) continue
+          fs.appendFileSync(file, JSON.stringify({ event: 'hermes-phase', childPid, observerPid, observedAt, spawnElapsedMs, phase }) + '\n')
+          streams.set(phase.pid, { sequence: phase.sequence, elapsedMs: phase.elapsedMs })
+          written++
+        } catch { /* 新诊断写失败不得改变子进程控制流或原始收据。 */ }
+      }
+    } catch { /* 保留原始 stderr/close 记录，不用诊断异常取代产品错误。 */ }
+  }
+}
+
 // 只旁听真实 spawn 的参数/输出/退出，不替换返回值、环境、信号或阶段执行。
 export function spawnAuditSource(log) {
-  return `import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const original=cp.spawn;const file=${JSON.stringify(log)};cp.spawn=function(...args){const child=Reflect.apply(original,this,args);const a=Array.isArray(args[1])?args[1]:[];const i=a.findIndex(x=>String(x).toLowerCase()==='-stage');const record=v=>fs.appendFileSync(file,JSON.stringify({pid:child.pid,program:args[0],args:a,stage:i>=0?a[i+1]:null,...v,at:new Date().toISOString()})+'\\n');if(child.pid)record({event:'start'});let stdout='',stderr='';child.stdout?.on('data',d=>{stdout=(stdout+d).slice(-1048576)});child.stderr?.on('data',d=>{stderr=(stderr+d).slice(-1048576)});child.on('close',(code,signal)=>record({event:'close',exitCode:code,signal,stdout,stderr}));return child};syncBuiltinESMExports();`
+  return `import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const original=cp.spawn;const file=${JSON.stringify(log)};const phaseReceiver=${createHermesPhaseReceiver.toString()};cp.spawn=function(...args){const child=Reflect.apply(original,this,args);const a=Array.isArray(args[1])?args[1]:[];const i=a.findIndex(x=>String(x).toLowerCase()==='-stage');const record=v=>fs.appendFileSync(file,JSON.stringify({pid:child.pid,program:args[0],args:a,stage:i>=0?a[i+1]:null,...v,at:new Date().toISOString()})+'\\n');if(child.pid)record({event:'start'});const phase=phaseReceiver(fs,file,child.pid,process.pid,process.env.CLAWPANEL_HERMES_PHASE_TIMING==='1');let stdout='',stderr='';child.stdout?.on('data',d=>{stdout=(stdout+d).slice(-1048576)});child.stderr?.on('data',d=>{stderr=(stderr+d).slice(-1048576);phase(d)});child.on('close',(code,signal)=>record({event:'close',exitCode:code,signal,stdout,stderr}));return child};syncBuiltinESMExports();`
 }
 
 async function reachable(port) { return new Promise(resolve => { const s = net.connect({ host: '127.0.0.1', port }); s.on('connect', () => { s.destroy(); resolve(true) }); s.on('error', () => resolve(false)); s.setTimeout(750, () => { s.destroy(); resolve(false) }) }) }
