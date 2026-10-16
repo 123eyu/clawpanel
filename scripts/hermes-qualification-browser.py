@@ -24,6 +24,23 @@ ORIGINAL_SOURCES = {
 NONCE = re.compile(r'browser-acceptance-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}')
 
 
+def validate_metadata_receipt(receipt):
+    assert receipt.get('accepted') is True
+    method, path, body = receipt.get('method'), receipt.get('path'), receipt.get('body')
+    assert type(body) is dict
+    if method == 'GET' and path in ('/v1/models', '/api/v1/models', '/api/tags', '/v1/props', '/props', '/version', '/v1/models/maintenance-model'):
+        assert body == {}
+        assert receipt.get('responseStatus') == (200 if path == '/v1/models' else 404)
+        protocols = {'/v1/models': 'openai-catalog', '/api/v1/models': 'lm-studio', '/api/tags': 'ollama', '/v1/props': 'llamacpp', '/props': 'llamacpp', '/version': 'vllm', '/v1/models/maintenance-model': 'openai'}
+        assert receipt.get('provider') == protocols[path]
+    elif method == 'POST' and path == '/api/show':
+        assert body == {'name': 'maintenance-model'}
+        assert receipt.get('responseStatus') == 404
+        assert receipt.get('provider') == 'ollama'
+    else:
+        raise AssertionError('未经归因的 metadata 路径/方法')
+
+
 def validate_base_url(value):
     u = urlsplit(value)
     if (u.scheme != 'http' or u.hostname not in ('127.0.0.1', 'localhost', '::1')
@@ -135,12 +152,19 @@ def validate_report(r):
     provider = r['provider']
     assert type(provider['afterSequence']) is int and provider['afterSequence'] >= 0
     receipts = provider['receipts']
-    assert len(receipts) == 2, '本轮 Provider 请求必须恰好2次'
-    assert [c['nonce'] for c in receipts] == nonces
+    assert 2 <= len(receipts) <= 130, '本轮只允许2次聊天和有界只读 metadata 请求'
+    chats = []
     for i, c in enumerate(receipts):
         assert c['seq'] == provider['afterSequence'] + i + 1, 'Provider 序号漏项/重项'
+        if c.get('kind') == 'metadata':
+            validate_metadata_receipt(c)
+            continue
+        assert c.get('kind') in (None, 'chat'), '未知 Provider 请求种类'
+        chats.append(c)
         assert c.get('nonceOccurrences') == 1 and c.get('accepted') is True and c.get('authMatches') is True
         assert c.get('model') == 'maintenance-model' and c.get('path') == '/v1/chat/completions'
+    assert len(chats) == 2, '本轮 Provider 聊天请求必须恰好2次'
+    assert [c['nonce'] for c in chats] == nonces
 
 
 def validate_ready(ready):

@@ -8,6 +8,7 @@ import net from 'node:net'
 import crypto from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { classifyHermesMetadataRequest } from './hermes-qualification-provider.mjs'
 
 export const ORIGINAL_SOURCES = Object.freeze({
   bootstrap: '45209e4fbd161555c0bac5c47d5cb62bd8a655280baf634faf2f728fb542ee97',
@@ -301,19 +302,26 @@ export async function main(argv = process.argv.slice(2)) {
   process.once('SIGTERM', () => { shutdown('SIGTERM').catch(error => { rawError(error); process.exit(1) }) })
   process.once('SIGINT', () => { shutdown('SIGINT').catch(error => { rawError(error); process.exit(1) }) })
   try {
-    write('provenance.json', { schemaVersion: 1, mode: 'warm-after-original-fresh11', originalSources: ORIGINAL_SOURCES, facts, originalReport: { path: reportFile, sha256: sha(reportBytes) }, originalEnvironment: { parentHash: parentEnvHash, configs: before }, childEnvSha256: jsonHash(env), tooling: { bootstrapSha256: sha(fs.readFileSync(fileURLToPath(import.meta.url))), browserSha256: sha(fs.readFileSync(path.join(tooling, 'scripts/hermes-qualification-browser.py'))) }, limitations: ['不安装、不拉取 vendor；不宣称修复本机异常 signal；Linux Web 不等于 Tauri 或 releaseReady'] })
+    write('provenance.json', { schemaVersion: 1, mode: 'warm-after-original-fresh11', originalSources: ORIGINAL_SOURCES, facts, originalReport: { path: reportFile, sha256: sha(reportBytes) }, originalEnvironment: { parentHash: parentEnvHash, configs: before }, childEnvSha256: jsonHash(env), tooling: { bootstrapSha256: sha(fs.readFileSync(fileURLToPath(import.meta.url))), browserSha256: sha(fs.readFileSync(path.join(tooling, 'scripts/hermes-qualification-browser.py'))), metadataPolicySha256: sha(fs.readFileSync(path.join(tooling, 'scripts/hermes-qualification-provider.mjs'))) }, limitations: ['不安装、不拉取 vendor；不宣称修复本机异常 signal；Linux Web 不等于 Tauri 或 releaseReady'] })
     // 原 fresh11 清理应已完成。先检查 HOME 无现存 Gateway/外来监听。
     gatewayPort = await freePort(); webPort = await freePort()
     fs.writeFileSync(path.join(config, 'clawpanel.json'), JSON.stringify({ ignoreRisk: true, openclawDir: config, engineMode: 'hermes', enabledEngines: ['hermes'], engineSetupChoice: 'explicit' }), { mode: 0o600 })
     provider = http.createServer(async (req, res) => {
       let seq
       try {
-        if (req.method === 'GET' && req.url === '/v1/models') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ data: [{ id: 'maintenance-model', object: 'model', owned_by: 'local' }] })) }
-        assert.equal(req.method, 'POST'); assert.equal(req.url, '/v1/chat/completions')
         let raw = '', bytes = 0
         for await (const chunk of req) { bytes += chunk.length; assert.ok(bytes <= 8 * 1024 * 1024, 'Provider 请求超额'); raw += chunk }
         seq = receipts.length + 1
-        const body = JSON.parse(raw), receipt = providerReceipt(body, req.headers.authorization, key, seq)
+        const body = raw ? JSON.parse(raw) : {}
+        const metadata = classifyHermesMetadataRequest(req.method, req.url, raw, ['maintenance-model'])
+        if (metadata) {
+          const receipt = { seq, at: stamp(), kind: 'metadata', method: req.method, path: req.url, body, bodySha256: sha(raw), responseStatus: metadata.status, provider: metadata.provider, accepted: true, authMatches: req.headers.authorization === `Bearer ${key}` }
+          receipts.push(receipt); write('provider-requests.json', receipts)
+          res.writeHead(metadata.status, { 'content-type': 'application/json' })
+          return res.end(JSON.stringify(metadata.status === 200 ? { data: [{ id: 'maintenance-model', object: 'model', owned_by: 'local' }] } : { error: 'unsupported-readonly-metadata' }))
+        }
+        assert.equal(req.method, 'POST'); assert.equal(req.url, '/v1/chat/completions')
+        const receipt = { ...providerReceipt(body, req.headers.authorization, key, seq), kind: 'chat', method: req.method, responseStatus: 200 }
         fs.appendFileSync(path.join(output, 'provider-private.jsonl'), JSON.stringify({ at: stamp(), body }) + '\n', { mode: 0o600 })
         assert.ok(!receipts.some(r => r.nonce === receipt.nonce), 'Provider nonce 重复请求')
         receipts.push(receipt); write('provider-requests.json', receipts)
@@ -324,7 +332,7 @@ export async function main(argv = process.argv.slice(2)) {
           res.end('data: [DONE]\n\n')
         } else { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ id: 'qualification-fixture', object: 'chat.completion', model: body.model, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 } })) }
       } catch (error) {
-        rawError(error); receipts.push({ seq: seq || receipts.length + 1, at: stamp(), path: req.url, accepted: false, authMatches: false }); write('provider-requests.json', receipts)
+        rawError(error); failed = true; receipts.push({ seq: seq || receipts.length + 1, at: stamp(), kind: 'unknown', method: req.method, path: req.url, accepted: false, authMatches: false }); write('provider-requests.json', receipts)
         res.writeHead(400, { 'content-type': 'application/json' }); res.end('{"error":"qualification-provider-rejected"}')
       }
     })

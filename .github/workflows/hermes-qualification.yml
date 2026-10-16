@@ -11,7 +11,7 @@ on:
         options: [baseline, candidate, both]
         default: baseline
       platform:
-        description: 'Windows 生产 Web / Linux fresh11 后两轮长 UI；均不代替 native Tauri'
+        description: 'Windows Web 后真实 native Tauri；Linux fresh11 后两轮长 UI'
         type: choice
         options: [windows, linux, both]
         default: both
@@ -58,11 +58,12 @@ jobs:
           node --input-type=module -e 'import fs from "node:fs";const m=JSON.parse(fs.readFileSync("matrix.json","utf8"));fs.appendFileSync(process.env.GITHUB_OUTPUT,"matrix="+JSON.stringify(m)+"\n")'
 
   qualify:
-    name: Windows ${{ matrix.variant }} — actual production Web (native missing)
+    name: Windows ${{ matrix.variant }} — production Web + actual native Tauri
     needs: prepare
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'qingchencloud/clawpanel' && inputs.platform != 'linux'
     runs-on: windows-2025
-    timeout-minutes: 90
+    # 3 次 Web + 2 次 Rust 安装各仍900秒，另含冷 Rust 构建与14分钟 UI预算；不重试失败。
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -82,6 +83,7 @@ jobs:
         with:
           node-version: 24.16.0
       - name: 真实 VM/SID 资格后才建立短 HOME 并执行候选（无本机回退）
+        id: web
         shell: pwsh
         env:
           CANDIDATE_SHA: ${{ matrix.sha }}
@@ -90,14 +92,166 @@ jobs:
         run: |
           node tooling/scripts/test-hermes-windows-qualification.mjs --execute --root candidate --sha "$env:CANDIDATE_SHA" --version "$env:EXPECTED_VERSION" --variant "$env:VARIANT" --output "$env:RUNNER_TEMP/hermes-qualification-$env:VARIANT"
           exit $LASTEXITCODE
-      # Native 后续追加，同一 Web HOME 的入口已导出；本次不把 missing 写成实际通过。
+      - name: 原资格先验、同 Web HOME 的私有 Rust 工具链（不写宿主 PATH）
+        id: native_environment
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ matrix.sha }}
+          EXPECTED_VERSION: ${{ matrix.version }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          @'
+          import fs from 'node:fs'; import path from 'node:path'; import assert from 'node:assert/strict'; import crypto from 'node:crypto'; import {spawn,spawnSync} from 'node:child_process';
+          import {actualRunnerProof,validateRunnerProof,runnerProofFailures,hostSnapshot,assertHostUnchanged,isolationEnv,assertSameSource} from './tooling/scripts/test-hermes-windows-qualification.mjs';
+          const output=path.join(process.env.RUNNER_TEMP,'hermes-native-build-'+process.env.VARIANT),webOutput=path.join(process.env.RUNNER_TEMP,'hermes-qualification-'+process.env.VARIANT),home=path.join(webOutput,'h');
+          assert.ok(!fs.existsSync(output),'native build 输出必须全新'); fs.mkdirSync(output);
+          const report={status:'failed',candidateSha:process.env.CANDIDATE_SHA,commands:[]},write=(name,value)=>fs.writeFileSync(path.join(output,name),JSON.stringify(value,null,2)),save=()=>write('environment-receipt.json',report),pending=new Set();
+          const alive=pid=>{try{process.kill(pid,0);return true}catch{return false}};
+          let proof,before,env; save();
+          async function run(program,args,timeout=120000){
+            const n=report.commands.length,item={program,args,startedAt:new Date().toISOString()};report.commands.push(item);save();
+            const result=await new Promise((resolve,reject)=>{const child=spawn(program,args,{env,windowsHide:true,stdio:['ignore','pipe','pipe']});item.pid=child.pid;if(child.pid)pending.add(child.pid);let stdout='',stderr='';
+              child.stdout.on('data',d=>{fs.appendFileSync(path.join(output,'setup-'+n+'.stdout.log'),d);stdout+=d});child.stderr.on('data',d=>{fs.appendFileSync(path.join(output,'setup-'+n+'.stderr.log'),d);stderr+=d});
+              const timer=setTimeout(()=>{item.timedOut=true;if(child.pid)spawnSync('taskkill.exe',['/PID',String(child.pid),'/T','/F'],{env,windowsHide:true});reject(Error('native toolchain command timeout'))},timeout);
+              child.once('error',e=>{clearTimeout(timer);reject(e)});child.once('close',(code,signal)=>{clearTimeout(timer);pending.delete(child.pid);Object.assign(item,{code,signal,finishedAt:new Date().toISOString()});save();resolve({code,stdout,stderr})});});
+            assert.equal(result.code,0,result.stderr.slice(-4000));return result.stdout.trim();
+          }
+          try{
+            proof=actualRunnerProof();write('runner-proof.json',proof);write('runner-admission.json',{failedConditions:runnerProofFailures(proof)});validateRunnerProof(proof);
+            before=hostSnapshot(proof);write('host-before.json',before);
+            const web=JSON.parse(fs.readFileSync(path.join(webOutput,'report.json'),'utf8'));
+            assert.equal(web.status,'passed-web-native-missing');assert.equal(web.candidateSha,process.env.CANDIDATE_SHA);assert.equal(web.expectedVersion,process.env.EXPECTED_VERSION);
+            assertSameSource(path.resolve('candidate'),web.sourceHashes);
+            env=isolationEnv({home,temp:path.join(output,'tmp'),realProfile:proof.actualProfile});fs.mkdirSync(env.TEMP,{recursive:true});
+            const tools=path.join(home,'.native-tools');env.CARGO_HOME=path.join(tools,'cargo');env.RUSTUP_HOME=path.join(tools,'rustup');env.RUSTUP_TOOLCHAIN='stable-x86_64-pc-windows-msvc';
+            const rustup=path.join(proof.actualProfile,'.cargo/bin/rustup.exe');assert.ok(fs.statSync(rustup).isFile());
+            await run(rustup,['toolchain','install',env.RUSTUP_TOOLCHAIN,'--profile','minimal','--no-self-update'],900000);
+            const cargo=await run(rustup,['which','cargo','--toolchain',env.RUSTUP_TOOLCHAIN]),rustc=await run(rustup,['which','rustc','--toolchain',env.RUSTUP_TOOLCHAIN]);
+            for(const file of [cargo,rustc])assert.ok(fs.realpathSync(file).toLowerCase().startsWith(fs.realpathSync(home).toLowerCase()+path.sep),'Rust 工具链越出私有 HOME');
+            report.rustVersion=await run(rustc,['--version']);report.rustupSha256=crypto.createHash('sha256').update(fs.readFileSync(rustup)).digest('hex');
+            const values={CARGO_HOME:env.CARGO_HOME,RUSTUP_HOME:env.RUSTUP_HOME,RUSTUP_TOOLCHAIN:env.RUSTUP_TOOLCHAIN,NATIVE_CARGO:cargo,NATIVE_TOOL_BIN:path.dirname(cargo),NATIVE_DRIVER_TARGET:path.join(tools,'driver-target'),NATIVE_TAURI_ROOT:path.join(tools,'tauri-driver'),NATIVE_EDGE_DRIVER:path.join(tools,'edge/msedgedriver.exe')};
+            for(const [key,value]of Object.entries(values)){assert.ok(!/[\r\n]/.test(value));fs.appendFileSync(process.env.GITHUB_ENV,key+'='+value+'\n')}
+            report.privatePaths=values;report.status='passed';
+          }catch(e){report.error=e.stack;process.exitCode=1}
+          finally{
+            for(const pid of pending)if(alive(pid))spawnSync('taskkill.exe',['/PID',String(pid),'/T','/F'],{env,windowsHide:true});
+            for(let n=0;n<30&&[...pending].some(alive);n++)await new Promise(r=>setTimeout(r,500));
+            try{assert.ok([...pending].every(pid=>!alive(pid)),'工具链子进程未退出');if(before){const after=hostSnapshot(proof);write('host-after.json',after);assertHostUnchanged(before,after);report.hostUnchanged=true}}catch(e){report.error=String(e);report.status='failed';process.exitCode=1}save();
+          }
+          '@ | node --input-type=module
+          exit $LASTEXITCODE
+      - name: 固定既有 v2 Rust cache 的不可变 commit（仅私有 Cargo/构建缓存）
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2，官方 annotated tag 已解引用
+        with:
+          prefix-key: hermes-qualification-native-v1
+          key: ${{ matrix.variant }}-${{ matrix.sha }}-tauri-driver-2.1.0
+          workspaces: candidate/src-tauri -> target
+          cache-directories: ${{ env.NATIVE_DRIVER_TARGET }}
+          cache-bin: false
+      - name: 同 SHA 原配置 no-bundle 构建、精确 WebView2 配套 driver（无全局安装）
+        id: native_build
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ matrix.sha }}
+          EXPECTED_VERSION: ${{ matrix.version }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          @'
+          import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import crypto from 'node:crypto';import {spawn,spawnSync} from 'node:child_process';
+          import {actualRunnerProof,validateRunnerProof,hostSnapshot,assertHostUnchanged,isolationEnv,assertSameSource} from './tooling/scripts/test-hermes-windows-qualification.mjs';
+          const output=path.join(process.env.RUNNER_TEMP,'hermes-native-build-'+process.env.VARIANT),webOutput=path.join(process.env.RUNNER_TEMP,'hermes-qualification-'+process.env.VARIANT),home=path.join(webOutput,'h'),root=path.resolve('candidate');
+          const report={status:'failed',candidateSha:process.env.CANDIDATE_SHA,commands:[]},hash=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex'),write=(n,v)=>fs.writeFileSync(path.join(output,n),JSON.stringify(v,null,2)),save=()=>write('build-receipt.json',report),pending=new Set(),alive=pid=>{try{process.kill(pid,0);return true}catch{return false}};
+          let env,proof,before;save();
+          async function run(program,args,timeout=120000){
+            const n=report.commands.length,item={program,args,startedAt:new Date().toISOString()};report.commands.push(item);save();
+            const result=await new Promise((resolve,reject)=>{const child=spawn(program,args,{cwd:root,env,windowsHide:true,stdio:['ignore','pipe','pipe']});item.pid=child.pid;if(child.pid)pending.add(child.pid);let stdout='',stderr='';
+              child.stdout.on('data',d=>{fs.appendFileSync(path.join(output,'build-'+n+'.stdout.log'),d);stdout+=d});child.stderr.on('data',d=>{fs.appendFileSync(path.join(output,'build-'+n+'.stderr.log'),d);stderr+=d});
+              const timer=setTimeout(()=>{item.timedOut=true;if(child.pid)spawnSync('taskkill.exe',['/PID',String(child.pid),'/T','/F'],{env,windowsHide:true});reject(Error('native build command timeout'))},timeout);
+              child.once('error',e=>{clearTimeout(timer);reject(e)});child.once('close',(code,signal)=>{clearTimeout(timer);pending.delete(child.pid);Object.assign(item,{code,signal,finishedAt:new Date().toISOString()});save();resolve({code,stdout,stderr})});});assert.equal(result.code,0,result.stderr.slice(-4000));return result.stdout.trim();
+          }
+          const ps=code=>run('powershell.exe',['-NoProfile','-EncodedCommand',Buffer.from(code,'utf16le').toString('base64')]);
+          try{
+            proof=actualRunnerProof();validateRunnerProof(proof);before=hostSnapshot(proof);write('build-host-before.json',before);
+            const web=JSON.parse(fs.readFileSync(path.join(webOutput,'report.json'),'utf8'));assert.equal(web.status,'passed-web-native-missing');assert.equal(web.candidateSha,process.env.CANDIDATE_SHA);assert.equal(web.expectedVersion,process.env.EXPECTED_VERSION);
+            env=isolationEnv({home,temp:path.join(output,'tmp'),realProfile:proof.actualProfile});
+            for(const k of ['CARGO_HOME','RUSTUP_HOME','RUSTUP_TOOLCHAIN','ProgramFiles','ProgramFiles(x86)','ProgramW6432'])if(process.env[k])env[k]=process.env[k];env.PATH=process.env.NATIVE_TOOL_BIN+';'+path.dirname(process.execPath)+';'+env.PATH;
+            for(const k of ['CARGO_HOME','RUSTUP_HOME','NATIVE_TOOL_BIN','NATIVE_CARGO','NATIVE_TAURI_ROOT','NATIVE_EDGE_DRIVER','NATIVE_DRIVER_TARGET'])assert.ok(path.resolve(process.env[k]).toLowerCase().startsWith(path.resolve(home).toLowerCase()+path.sep),'native 工具路径越界 '+k);
+            assert.equal(await run('git',['--no-optional-locks','-C',root,'rev-parse','HEAD']),process.env.CANDIDATE_SHA);assert.equal(await run('git',['--no-optional-locks','-C',root,'status','--porcelain','--untracked-files=no']),'');
+            assertSameSource(root,web.sourceHashes);assertSameSource(web.environment.source,web.sourceHashes);assertSameSource(web.environment.source,web.distHashes);write('source-sha256.json',{sha:process.env.CANDIDATE_SHA,files:web.sourceHashes,webManifestSha256:hash(path.join(webOutput,'source-sha256.json'))});
+            const metadataUrl='https://crates.io/api/v1/crates/tauri-driver/2.1.0',response=await fetch(metadataUrl,{headers:{'user-agent':'ClawPanel-manual-qualification'},signal:AbortSignal.timeout(120000)});assert.equal(response.status,200);const metadata=await response.json();write('tauri-driver-crate.json',{metadataUrl,...metadata});
+            assert.equal(metadata.version.num,'2.1.0');assert.equal(metadata.version.yanked,false);assert.equal(metadata.version.checksum,'2f2e29bd6900fb718dfdc06f2e7a371d6087c085daaf83709847ef3e6b0c1953');
+            await run(process.env.NATIVE_CARGO,['install', 'tauri-driver', '--version', '2.1.0', '--locked', '--root',process.env.NATIVE_TAURI_ROOT,'--target-dir',process.env.NATIVE_DRIVER_TARGET],1200000);
+            const driver=path.join(process.env.NATIVE_TAURI_ROOT,'bin/tauri-driver.exe'),tauriVersion=await run(driver,['--version']);assert.equal(tauriVersion,'tauri-driver 2.1.0');
+            // 官方 msedgedriver-tool 同一 WebView2 GUID/注册表顺序；无 latest 或不同版本 fallback。
+            const runtime=JSON.parse(await ps(String.raw`$ErrorActionPreference='Stop';$guid='{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';$keys=@('HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\','HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\','HKCU:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\','HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\');$facts=@();foreach($k in $keys){$v=Get-ItemProperty -LiteralPath ($k+$guid) -ErrorAction SilentlyContinue;if($v.pv){$facts+=@{key=($k+$guid);version=$v.pv}}};$roots=@(([Environment]::GetFolderPath('ProgramFilesX86')+'\Microsoft\EdgeWebView\Application'),([Environment]::GetFolderPath('ProgramFiles')+'\Microsoft\EdgeWebView\Application'),('${proof.actualProfile}\AppData\Local\Microsoft\EdgeWebView\Application'));foreach($f in $facts){if($f.version -notmatch '^\d+\.\d+\.\d+\.\d+$'){continue};foreach($base in $roots){$exe=Join-Path (Join-Path $base $f.version) 'msedgewebview2.exe';if(Test-Path -LiteralPath $exe){$info=[Diagnostics.FileVersionInfo]::GetVersionInfo($exe);@{version=$f.version;binaryVersion=$info.ProductVersion;path=$exe;registry=$facts}|ConvertTo-Json -Depth 6;exit 0}}};throw 'No matching installed WebView2 executable'`));
+            assert.match(runtime.version,/^\d+\.\d+\.\d+\.\d+$/);assert.equal(runtime.binaryVersion.match(/^\d+\.\d+\.\d+\.\d+/)?.[0],runtime.version);write('installed-webview2.json',runtime);
+            const url=`https://msedgedriver.microsoft.com/${runtime.version}/edgedriver_win64.zip`,download=await fetch(url,{signal:AbortSignal.timeout(300000)});assert.equal(download.status,200);const chunks=[];let bytes=0;for await(const b of download.body){bytes+=b.length;assert.ok(bytes<=100*1024*1024);chunks.push(b)}
+            const edge=process.env.NATIVE_EDGE_DRIVER,zip=path.join(path.dirname(edge),'edgedriver_win64.zip');fs.mkdirSync(path.dirname(edge),{recursive:true});fs.writeFileSync(zip,Buffer.concat(chunks),{flag:'wx'});
+            const z=Buffer.from(zip).toString('base64'),e=Buffer.from(edge).toString('base64');
+            await ps(`$ErrorActionPreference='Stop';Add-Type -AssemblyName System.IO.Compression.FileSystem;$z=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${z}'));$e=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${e}'));$a=[IO.Compression.ZipFile]::OpenRead($z);try{$entry=$a.GetEntry('msedgedriver.exe');if(!$entry){throw 'Missing msedgedriver.exe ZIP member'};[IO.Compression.ZipFileExtensions]::ExtractToFile($entry,$e,$false)}finally{$a.Dispose()}`);
+            const edgeVersion=await run(edge,['--version']);assert.equal(edgeVersion.match(/^MSEdgeDriver (\d+\.\d+\.\d+\.\d+)(?:\s|$)/)?.[1],runtime.version);
+            const drivers={tauri:{path:driver,version:tauriVersion,sha256:hash(driver),crateChecksum:metadata.version.checksum},microsoft:{url,finalUrl:download.url,version:edgeVersion,sha256:hash(edge),zipSha256:hash(zip),webview2:runtime}};write('driver-receipt.json',drivers);
+            const npmArguments=['ci'];await run(process.execPath,[path.join(path.dirname(process.execPath),'node_modules/npm/bin/npm-cli.js'),...npmArguments],600000);
+            await run(process.execPath,[path.join(root,'node_modules/@tauri-apps/cli/tauri.js'),'build', '--no-bundle', '--ci', '--', '--locked'],1800000);
+            assertSameSource(root,web.sourceHashes);assertSameSource(root,web.distHashes);
+            const app=path.join(root,'src-tauri/target/release/clawpanel.exe');assert.ok(fs.statSync(app).isFile());report.application={path:app,sha256:hash(app)};report.driverReceiptSha256=hash(path.join(output,'driver-receipt.json'));report.sourceManifestSha256=hash(path.join(webOutput,'source-sha256.json'));report.distHashes=web.distHashes;report.status='passed';
+          }catch(e){report.error=e.stack;process.exitCode=1}
+          finally{
+            for(const pid of pending)if(alive(pid))spawnSync('taskkill.exe',['/PID',String(pid),'/T','/F'],{env,windowsHide:true});for(let n=0;n<30&&[...pending].some(alive);n++)await new Promise(r=>setTimeout(r,500));
+            try{assert.ok([...pending].every(pid=>!alive(pid)),'构建子进程未退出');if(before){const after=hostSnapshot(proof);write('build-host-after.json',after);assertHostUnchanged(before,after);report.hostUnchanged=true}}catch(e){report.error=String(e);report.status='failed';process.exitCode=1}save();
+          }
+          '@ | node --input-type=module
+          exit $LASTEXITCODE
+      - name: 实际 ClawPanel.exe WebView2 两轮及 Rust update/uninstall/install/STOP
+        id: native
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ matrix.sha }}
+          EXPECTED_VERSION: ${{ matrix.version }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          node tooling/scripts/test-hermes-tauri-qualification.mjs --execute --root candidate --sha "$env:CANDIDATE_SHA" --version "$env:EXPECTED_VERSION" --web-output "$env:RUNNER_TEMP/hermes-qualification-$env:VARIANT" --output "$env:RUNNER_TEMP/hermes-native-$env:VARIANT" --application "$env:GITHUB_WORKSPACE/candidate/src-tauri/target/release/clawpanel.exe" --driver "$env:NATIVE_TAURI_ROOT/bin/tauri-driver.exe" --native-driver "$env:NATIVE_EDGE_DRIVER"
+          exit $LASTEXITCODE
+      - name: Web/native 独立原报告汇总，native 缺失或任一门禁失败均红
+        id: native_summary
+        if: always()
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ matrix.sha }}
+          EXPECTED_VERSION: ${{ matrix.version }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          @'
+          import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import crypto from 'node:crypto';
+          import {assertSameSource,assertHostUnchanged} from './tooling/scripts/test-hermes-windows-qualification.mjs';import {assertNativeComplete} from './tooling/scripts/test-hermes-tauri-qualification.mjs';
+          const base=process.env.RUNNER_TEMP,v=process.env.VARIANT,output=path.join(base,'hermes-summary-'+v);assert.ok(!fs.existsSync(output));fs.mkdirSync(output);
+          const read=f=>JSON.parse(fs.readFileSync(f,'utf8')),hash=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+          const report={status:'failed',candidateSha:process.env.CANDIDATE_SHA,expectedVersion:process.env.EXPECTED_VERSION,nativeMissing:true};
+          try{
+            const web=read(path.join(base,'hermes-qualification-'+v,'report.json')),native=read(path.join(base,'hermes-native-'+v,'report.json')),build=read(path.join(base,'hermes-native-build-'+v,'build-receipt.json'));report.nativeMissing=false;
+            assert.equal(web.status,'passed-web-native-missing');assert.equal(native.status,'passed-native-tauri');assert.equal(build.status,'passed');
+            for(const r of [web,native,build])assert.equal(r.candidateSha,process.env.CANDIDATE_SHA);for(const r of [web,native])assert.equal(r.expectedVersion,process.env.EXPECTED_VERSION);
+            assertNativeComplete(native);assert.deepEqual(native.nativeInstallerLifecycle?.map(x=>x.name),['update','uninstall','reinstall']);assert.ok(native.nativeInstallerLifecycle.every(x=>x.passed&&x.dataPreserved));assertSameSource(path.resolve('candidate'),web.sourceHashes);assertSameSource(path.resolve('candidate'),web.distHashes);assertSameSource(web.environment.source,web.sourceHashes);assertSameSource(web.environment.source,web.distHashes);
+            assert.equal(hash(build.application.path),build.application.sha256);assert.equal(native.application.sha256,build.application.sha256);
+            // 不同 step 的 GitHub 临时 env 会变化；各 step 自己仍做完整 parentEnvSha256 比较。跨层再比较原机器事实。
+            const {parentEnvSha256:webEnv,...machineBefore}=read(path.join(base,'hermes-qualification-'+v,'host-before.json')),{parentEnvSha256:nativeEnv,...machineAfter}=read(path.join(base,'hermes-native-'+v,'host-after.json'));assertHostUnchanged(machineBefore,machineAfter);
+            report.status='passed-web-and-native';report.webStatus=web.status;report.nativeStatus=native.status;report.rounds=native.rounds.length;report.application=build.application;report.tooling={sha:process.env.GITHUB_WORKFLOW_SHA,harnessSha256:hash('tooling/scripts/test-hermes-tauri-qualification.mjs'),qualificationSha256:hash('tooling/scripts/test-hermes-windows-qualification.mjs')};report.evidence={webSha256:hash(path.join(base,'hermes-qualification-'+v,'report.json')),nativeSha256:hash(path.join(base,'hermes-native-'+v,'report.json')),buildSha256:hash(path.join(base,'hermes-native-build-'+v,'build-receipt.json'))};
+          }catch(e){report.error=e.stack;process.exitCode = 1}
+          fs.writeFileSync(path.join(output,'qualification-summary.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({status:report.status,nativeMissing:report.nativeMissing,output}));
+          '@ | node --input-type=module
+          exit $LASTEXITCODE
       - name: 仅生成脱敏公开证据（原始 HOME/env/cache 从不上传，trace ZIP 逐成员脱敏）
         if: always()
         shell: pwsh
         env:
           VARIANT: ${{ matrix.variant }}
         run: |
-          node tooling/scripts/test-hermes-windows-qualification.mjs --publish-evidence "$env:RUNNER_TEMP/hermes-qualification-$env:VARIANT" --output "$env:RUNNER_TEMP/hermes-public-$env:VARIANT"
+          @'
+          import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {publishEvidence} from './tooling/scripts/test-hermes-windows-qualification.mjs';
+          const base=process.env.RUNNER_TEMP,v=process.env.VARIANT,roots={};
+          for(const [label,prefix]of Object.entries({web:'hermes-qualification-',native:'hermes-native-',build:'hermes-native-build-',summary:'hermes-summary-'})){const p=path.join(base,prefix+v);if(fs.existsSync(p))roots[label]=p}
+          assert.ok(Object.keys(roots).length,'没有可保留的原始证据');await publishEvidence({roots,output:path.join(base,'hermes-public-'+v)});
+          '@ | node --input-type=module
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -157,7 +311,7 @@ jobs:
           pathlib.Path(os.environ['EVIDENCE'],'source-sha256.json').write_text(json.dumps({'sha':sha,'files':files},indent=2))
           PY
           docker build --file tooling/.github/maintenance/Runtime.Dockerfile --tag hermes-qualification-trusted tooling
-          sha256sum tooling/.github/maintenance/Runtime.Dockerfile tooling/scripts/maintenance-runtime-smoke.mjs tooling/scripts/hermes-qualification-bootstrap.mjs tooling/scripts/hermes-qualification-browser.py > "$EVIDENCE/tooling-sha256.txt"
+          sha256sum tooling/.github/maintenance/Runtime.Dockerfile tooling/scripts/maintenance-runtime-smoke.mjs tooling/scripts/hermes-qualification-bootstrap.mjs tooling/scripts/hermes-qualification-browser.py tooling/scripts/hermes-qualification-provider.mjs > "$EVIDENCE/tooling-sha256.txt"
           python3 -m venv "$RUNNER_TEMP/hermes-browser-venv"
           "$RUNNER_TEMP/hermes-browser-venv/bin/pip" install 'playwright==1.58.0'
           "$RUNNER_TEMP/hermes-browser-venv/bin/python" -m playwright install chromium

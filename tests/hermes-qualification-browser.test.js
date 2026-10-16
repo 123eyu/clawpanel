@@ -13,6 +13,15 @@ const python = process.platform === 'win32' ? 'python' : 'python3'
 const load = () => import(pathToFileURL(bootstrap).href)
 const clone = value => structuredClone(value)
 
+test('实际 Provider 对只读探针单独记账并保留未知请求失败和工具依赖 hash', () => {
+  const source = fs.readFileSync(bootstrap, 'utf8')
+  assert.match(source, /classifyHermesMetadataRequest\(req.method, req.url, raw, \['maintenance-model'\]\)/)
+  assert.match(source, /metadataPolicySha256/)
+  assert.match(source, /kind: 'metadata'/)
+  assert.match(source, /responseStatus: metadata.status/)
+  assert.match(source, /rawError\(error\); failed = true; receipts.push/)
+})
+
 test('两个入口存在且导入不启动服务，保留原断言来源 SHA256', async () => {
   assert.ok(fs.existsSync(browser), '浏览器入口缺失')
   const m = await load()
@@ -160,6 +169,13 @@ new=copy.deepcopy(s);new['gatewayPids']=[124];new['gatewayIdentity']=[{'pid':124
 nonces=['browser-acceptance-11111111-1111-4111-8111-111111111111','browser-acceptance-22222222-2222-4222-8222-222222222222']
 r={'ok':True,'errors':[],'steps':m.expected_steps(210),'baseline':s,'hold':{'seconds':210,'elapsedSeconds':210.1,'health':[{'index':i,'offsetSeconds':i*5,'status':200,'health':{'status':'ok','platform':'hermes-agent','version':'0.21.5'},'snapshot':copy.deepcopy(s)} for i in range(42)]},'lifecycle':{'initialOnline':s,'afterStop':off,'restarted':new,'finalStop':off,'historyAfterReload':True,'historyAfterRestart':True,'finalDataRetained':True},'sends':[{'nonce':n,'method':'button.click','reply':'浏览器完整回复：'+n+'；模型：maintenance-model。','fullReplyVisible':True} for n in nonces],'provider':{'afterSequence':0,'receipts':[{'seq':i+1,'nonce':n,'nonceOccurrences':1,'accepted':True,'authMatches':True,'model':'maintenance-model','path':'/v1/chat/completions'} for i,n in enumerate(nonces)]}}
 m.validate_report(r)
+mixed=copy.deepcopy(r)
+meta={'kind':'metadata','method':'POST','path':'/api/show','body':{'name':'maintenance-model'},'responseStatus':404,'provider':'ollama','accepted':True,'authMatches':False}
+chat1,chat2=mixed['provider']['receipts'];chat1['seq']=2;chat2['seq']=4
+mixed['provider']['receipts']=[dict(meta,seq=1),chat1,dict(meta,seq=3),chat2]
+m.validate_report(mixed)
+for patch in [{'path':'/unknown'},{'method':'DELETE'},{'body':{'name':'foreign'}},{'responseStatus':200},{'accepted':False},{'provider':'fake'}]:
+ bad=copy.deepcopy(mixed);bad['provider']['receipts'][0].update(patch);reject(lambda:m.validate_report(bad))
 mutations=[lambda x:x['steps'].pop(),lambda x:x['errors'].append('pageerror'),lambda x:x['hold']['health'].pop(),lambda x:x['hold']['health'].append(copy.deepcopy(x['hold']['health'][0])),lambda x:x['hold'].update(elapsedSeconds=209),lambda x:x['hold']['health'][3].update(status=500),lambda x:x['hold']['health'][4].update(offsetSeconds=0),lambda x:x['hold']['health'][3]['snapshot']['fingerprints'].update(environment='wrong'),lambda x:x['hold']['health'][3]['snapshot'].update(gatewayPids=[0]),lambda x:x['sends'][0].update(method='Enter'),lambda x:x['sends'][0].update(fullReplyVisible=False),lambda x:x['provider']['receipts'].append(copy.deepcopy(x['provider']['receipts'][0])),lambda x:x['provider']['receipts'][0].update(authMatches=False),lambda x:x['lifecycle']['afterStop'].update(portOpen=True),lambda x:x['lifecycle'].update(restarted=copy.deepcopy(s)),lambda x:x['lifecycle'].update(finalDataRetained=False)]
 for mutate in mutations:
  x=copy.deepcopy(r);mutate(x);reject(lambda:m.validate_report(x))

@@ -9,6 +9,7 @@ import http from 'node:http'
 import net from 'node:net'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { classifyHermesMetadataRequest } from './hermes-qualification-provider.mjs'
 
 export const STAGES = ['source-isolation', 'install-privatecompletion', 'runtime-ui', 'update-stop', 'uninstall-reinstall-preserve']
 const tooling = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -49,7 +50,7 @@ export function matrixFromInputs(env) {
 }
 
 export function runnerProofFailures(p) {
-  // 与原有合取门禁逐项等价；原因只含静态条件名，不拼入环境值或凭据。
+  // 除 ImageOS 精确两项 allowlist 外保留原有合取门禁；原因不拼入环境值或凭据。
   const checks = {
     platform: p.platform === 'win32', architecture: p.arch === 'x64',
     'runner-environment': p.runnerEnvironment === 'github-hosted', 'runner-os': p.runnerOS === 'Windows',
@@ -57,7 +58,7 @@ export function runnerProofFailures(p) {
     'workflow-ref': p.workflowRef === 'qingchencloud/clawpanel/.github/workflows/hermes-qualification.yml@refs/heads/main',
     'workflow-sha-format': exactSha(p.workflowSha), 'workflow-sha-match': p.workflowSha === p.toolingSha,
     'run-id': /^\d+$/.test(p.runId || ''), 'run-attempt': /^\d+$/.test(p.attempt || ''),
-    'virtual-machine': p.virtualMachine === true, 'image-os': /^win\d+$/.test(p.imageOS || ''), 'image-version': !!p.imageVersion,
+    'virtual-machine': p.virtualMachine === true, 'image-os': ['win25', 'win25-vs2026'].includes(p.imageOS), 'image-version': !!p.imageVersion,
     'user-name': p.userName?.toLowerCase() === 'runneradmin', 'sid-format': /^S-1-5-21-\d+-\d+-\d+-\d+$/.test(p.sid || ''),
     'actual-profile': /^[a-z]:\\Users\\runneradmin$/i.test(p.actualProfile || ''), 'profile-registration': p.actualProfile?.toLowerCase() === p.registeredProfile?.toLowerCase(),
   }
@@ -357,6 +358,8 @@ async function execute(o) {
     r.runnerAdmission = { passed: false, failedConditions: runnerProofFailures(proof) }
     r.runnerAdmission.passed = r.runnerAdmission.failedConditions.length === 0
     write('runner-admission.json', r.runnerAdmission); save(); validateRunnerProof(proof)
+    r.toolingDependencies = Object.fromEntries(['scripts/test-hermes-windows-qualification.mjs', 'scripts/hermes-qualification-provider.mjs'].map(file => [file, hash(path.join(tooling, file))]))
+    write('tooling-dependencies.json', { sha: proof.toolingSha, files: r.toolingDependencies })
     assert.ok(within(physical(process.env.RUNNER_TEMP), output), '输出不在本次 RUNNER_TEMP')
     assert.ok(within(physical(process.env.GITHUB_WORKSPACE), physical(o['--root'])), '候选不在 checkout workspace')
     before = hostSnapshot(proof); write('host-before.json', before)
@@ -403,18 +406,33 @@ async function execute(o) {
     base = `http://127.0.0.1:${webPort}`; await until(() => reachable(webPort), 30000)
     await stage('install-privatecompletion', async () => { r.installerStarted = true; markInstall(); save(); await api('install_hermes', { method: 'uv-tool' }, 900000); return completion() })
     await stage('runtime-ui', async () => {
+      const providerModels = ['qualification-one', 'qualification-two']
       provider = http.createServer(async (req, res) => {
+        let raw = '', receipt
+        const authMatches = req.headers.authorization === 'Bearer qualification-local-no-secret'
+        const record = fields => {
+          receipt = { seq: providerHTTP.length + 1, at: new Date().toISOString(), method: req.method, path: req.url, bodySha256: digest(raw), authMatches, ...fields }
+          providerHTTP.push(receipt); write('provider-http.json', providerHTTP)
+        }
         try {
-        let raw = ''; for await (const d of req) { raw += d; if (raw.length > 8388608) { res.writeHead(413); return res.end() } }
-        providerHTTP.push({ at: new Date().toISOString(), method: req.method, url: req.url, authMatches: req.headers.authorization === 'Bearer qualification-local-no-secret' }); write('provider-http.json', providerHTTP)
-        if (req.url === '/v1/models') { res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ data: ['qualification-one', 'qualification-two'].map(id => ({ id, object: 'model' })) })) }
+        for await (const d of req) { raw += d; if (raw.length > 8388608) { r.providerError = 'provider request body too large'; record({ kind: 'unknown', body: {}, responseStatus: 413, accepted: false }); save(); res.writeHead(413); return res.end() } }
+        const metadata = classifyHermesMetadataRequest(req.method, req.url, raw, providerModels)
+        if (metadata) {
+          record({ kind: 'metadata', body: req.method === 'POST' ? JSON.parse(raw) : {}, responseStatus: metadata.status, provider: metadata.provider, accepted: true })
+          write('provider-metadata.json', providerHTTP.filter(row => row.kind === 'metadata'))
+          res.writeHead(metadata.status, { 'content-type': 'application/json' })
+          if (metadata.status === 200) return res.end(JSON.stringify({ data: providerModels.map(id => ({ id, object: 'model' })) }))
+          return res.end(JSON.stringify({ error: 'metadata protocol not provided by this OpenAI fixture' }))
+        }
+        assert.equal(req.method, 'POST'); assert.equal(req.url, '/v1/chat/completions')
         const b = JSON.parse(raw), nonce = [...JSON.stringify(b.messages || []).matchAll(/hq-[a-f0-9-]{36}/g)].at(-1)?.[0], reply = `Hermes qualification reply ${nonce} ${b.model}.`
         const purpose = classifyProviderRequest(b), system = (b.messages || []).filter(m => m.role === 'system').map(m => String(m.content || '')).join('\n')
-        calls.push({ at: new Date().toISOString(), purpose, systemPrefix: system.slice(0, 200), systemSha256: digest(system), url: req.url, nonce, model: b.model, stream: b.stream, messages: b.messages, authenticated: req.headers.authorization === 'Bearer qualification-local-no-secret' }); write('provider-requests.json', calls)
+        record({ kind: purpose === 'unattributed' ? 'unknown' : purpose, body: { model: b.model }, model: b.model, nonce, responseStatus: 200, accepted: authMatches && purpose !== 'unattributed' })
+        calls.push({ at: new Date().toISOString(), kind: receipt.kind, method: req.method, path: req.url, bodySha256: digest(raw), purpose, systemPrefix: system.slice(0, 200), systemSha256: digest(system), url: req.url, nonce, model: b.model, stream: b.stream, messages: b.messages, authenticated: req.headers.authorization === 'Bearer qualification-local-no-secret' }); write('provider-requests.json', calls)
         assert.equal(req.url, '/v1/chat/completions'); assert.equal(req.headers.authorization, 'Bearer qualification-local-no-secret')
         if (b.stream) { res.writeHead(200, { 'content-type': 'text/event-stream' }); for (const delta of [{ role: 'assistant', content: '' }, { content: reply }, {}]) res.write('data: ' + JSON.stringify({ id: 'qualification', object: 'chat.completion.chunk', model: b.model, choices: [{ index: 0, delta, finish_reason: Object.keys(delta).length ? null : 'stop' }] }) + '\n\n'); res.end('data: [DONE]\n\n') }
         else { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ id: 'qualification', object: 'chat.completion', model: b.model, choices: [{ index: 0, message: { role: 'assistant', content: reply }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 } })) }
-        } catch (e) { r.providerError = String(e); if (!res.headersSent) res.writeHead(500); res.end('qualification provider error'); save() }
+        } catch (e) { r.providerError = String(e); if (!receipt) record({ kind: 'unknown', body: {}, responseStatus: 500, accepted: false }); else { receipt.responseStatus = 500; receipt.accepted = false; write('provider-http.json', providerHTTP) }; if (!res.headersSent) res.writeHead(500); res.end('qualification provider error'); save() }
       }); await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve))
       r.providerPort = provider.address().port
       const url = `http://127.0.0.1:${provider.address().port}/v1`
@@ -476,6 +494,7 @@ async function execute(o) {
     if (before) { try { const after = hostSnapshot(proof); write('host-after.json', after); assertHostUnchanged(before, after); r.hostUnchanged = true } catch (e) { r.hostUnchanged = false; r.hostChangeError = e.message } }
     if (r.sourceHashes) { r.sourceDrift = Object.keys(r.sourceHashes).filter(f => !fs.existsSync(path.join(project, f)) || hash(path.join(project, f)) !== r.sourceHashes[f]); if (r.sourceDrift.length) r.error = '源文件发生漂移' }
     if (r.distHashes) { r.distDrift = Object.keys(r.distHashes).filter(f => !fs.existsSync(path.join(project, f)) || hash(path.join(project, f)) !== r.distHashes[f]); if (r.distDrift.length) r.error = 'dist 发生漂移' }
+    if (r.toolingDependencies) { r.toolingDrift = Object.keys(r.toolingDependencies).filter(f => !fs.existsSync(path.join(tooling, f)) || hash(path.join(tooling, f)) !== r.toolingDependencies[f]); if (r.toolingDrift.length) r.error = '可信 tooling 发生漂移' }
     if (env) { for (const name of ['gateway-run.log', 'dashboard-run.log']) { const f = path.join(env.HERMES_HOME, name); if (fs.existsSync(f)) fs.copyFileSync(f, path.join(output, name)) } }
     r.status = r.error || r.stopError || r.browserCleanupError || r.cleanupError || r.providerError ? 'failed' : qualificationStatus(r); r.finishedAt = new Date().toISOString(); save()
   }

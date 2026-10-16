@@ -212,17 +212,55 @@ test('产物仅上传新公开副本，不带 HOME/env/caches，日志与 trace 
   } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
 })
 
-test('workflow 只上传脱敏 public 副本；导出供 native 严格复用而本轮不追加 native 步骤', async () => {
+test('workflow 只上传脱敏 public 副本，native 严格复用既有资格与快照导出', async () => {
   const q = await load(); assert.equal(typeof q.actualRunnerProof, 'function'); assert.equal(typeof q.hostSnapshot, 'function')
   const w = YAML.parse(fs.readFileSync(path.join(root, '.github/workflows/hermes-qualification.yml'), 'utf8'))
   for (const job of [w.jobs.qualify, w.jobs['linux-long-ui']]) {
-    const publish = job.steps.findIndex(s => s.run?.includes('--publish-evidence'))
+    const publish = job.steps.findIndex(s => s.run?.includes('--publish-evidence') || s.run?.includes('await publishEvidence('))
     const upload = job.steps.findIndex(s => s.uses?.startsWith('actions/upload-artifact@'))
     assert.ok(publish >= 0 && upload > publish)
     assert.equal(job.steps[publish].if, 'always()')
     assert.match(job.steps[upload].with.path, /hermes-public-/)
     assert.doesNotMatch(job.steps[upload].with.path, /hermes-qualification-/)
   }
+})
+
+test('Windows workflow 缺 native 接线必须红：Web 后同 SHA 构建，再真实两轮及 Rust lifecycle', () => {
+  const src = fs.readFileSync(path.join(root, '.github/workflows/hermes-qualification.yml'), 'utf8'), w = YAML.parse(src), job = w.jobs.qualify
+  assert.equal(job['timeout-minutes'], 120, '3Web+2Rust installer900s 与构建/14min UI 累计预算，不放宽单次安装')
+  const steps = job.steps, index = id => steps.findIndex(s => s.id === id)
+  for (const id of ['web', 'native_environment', 'native_build', 'native', 'native_summary']) assert.ok(index(id) >= 0, `缺少 ${id} 门禁`)
+  assert.ok(index('web') < index('native_environment') && index('native_environment') < index('native_build') && index('native_build') < index('native') && index('native') < index('native_summary'))
+  const setup = steps[index('native_environment')].run, build = steps[index('native_build')].run, native = steps[index('native')].run, summary = steps[index('native_summary')]
+  for (const body of [setup, build]) { assert.match(body, /actualRunnerProof\(\)/); assert.match(body, /validateRunnerProof\(proof\)/); assert.match(body, /isolationEnv\(/); assert.match(body, /hostSnapshot\(proof\)/); assert.match(body, /assertHostUnchanged\(/) }
+  assert.match(setup + build, /passed-web-native-missing/); assert.match(build, /assertSameSource/)
+  assert.match(build, /\['ci'\]/); assert.match(build, /'build', '--no-bundle', '--ci', '--', '--locked'/)
+  assert.match(build, /'install', 'tauri-driver', '--version', '2\.1\.0', '--locked', '--root'/)
+  assert.match(build, /version\.yanked/); assert.match(build, /2f2e29bd6900fb718dfdc06f2e7a371d6087c085daaf83709847ef3e6b0c1953/)
+  assert.match(build, /https:\/\/msedgedriver\.microsoft\.com\/\$\{[^}]+\}\/edgedriver_win64\.zip/)
+  assert.match(build, /EdgeUpdate/); assert.match(build, /GetFileVersionInfo|FileVersionInfo/); assert.match(build, /driver-receipt\.json/)
+  assert.match(build, /sha256/); assert.match(build, /--version/)
+  const cache = steps.find(s => s.uses?.toLowerCase().startsWith('swatinem/rust-cache@'))
+  assert.ok(cache); assert.match(cache.uses, /@[a-f0-9]{40}$/); assert.equal(cache.with.workspaces, 'candidate/src-tauri -> target'); assert.equal(cache.with['cache-bin'], false)
+  assert.ok(steps.indexOf(cache) > index('native_environment') && steps.indexOf(cache) < index('native_build'))
+  for (const value of ['test-hermes-tauri-qualification.mjs --execute', '--root candidate', '--sha', '--version', '--web-output', '--output', '--application', 'candidate/src-tauri/target/release/clawpanel.exe', '--driver', '--native-driver']) assert.ok(native.includes(value), value)
+  assert.equal(summary.if, 'always()'); assert.match(summary.run, /assertNativeComplete/); assert.match(summary.run, /passed-native-tauri/); assert.match(summary.run, /process\.exitCode = 1/)
+  assert.doesNotMatch(src, /continue-on-error|GITHUB_PATH|Set-ExecutionPolicy|LATEST_RELEASE|selenium|--ignore-version-mismatches|--features.*webdriver|tauri-plugin-webdriver/i)
+})
+
+test('native literal Git blob 策略要求当前 tracked bat/cmd 为0，未来引入 CRLF 文件必须另审', () => {
+  const r = spawnSync('git', ['--no-optional-locks', '-C', root, 'ls-files', '--', '*.bat', '*.cmd'], { encoding: 'utf8', windowsHide: true })
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(r.stdout.trim(), '', '新增 tracked bat/cmd 后须先审查严格行尾规范化契约；不忽略文件或删除 assertSameSource')
+})
+
+test('Windows native、build 与 Web 报告多根同一次脱敏，不上传 native tmp 或整个 HOME', () => {
+  const w = YAML.parse(fs.readFileSync(path.join(root, '.github/workflows/hermes-qualification.yml'), 'utf8'))
+  const publish = w.jobs.qualify.steps.find(s => s.run?.includes('await publishEvidence('))
+  assert.ok(publish); assert.equal(publish.if, 'always()')
+  for (const label of ['web', 'native', 'build', 'summary']) assert.ok(publish.run.includes(label), label)
+  assert.match(publish.run, /hermes-public-/)
+  assert.equal(w.jobs.qualify.steps.find(s => s.uses?.startsWith('actions/upload-artifact@')).with.path, '${{ runner.temp }}/hermes-public-${{ matrix.variant }}/')
 })
 
 test('testjob-envcontext: job env 禁用 runner.temp；step 写 GITHUB_ENV，artifact 路径仍合法', () => {
@@ -271,6 +309,15 @@ test('runner admission 失败前落盘实际 proof 与逐条件 reason，诊断�
   const src = fs.readFileSync(script, 'utf8'), begin = src.indexOf('proof = actualRunnerProof()'), validate = src.indexOf('validateRunnerProof(proof)', begin)
   assert.ok(begin >= 0 && validate > begin)
   for (const name of ['runner-proof.json', 'runner-admission.json']) { const write = src.indexOf(`write('${name}'`, begin); assert.ok(write > begin && write < validate, `${name} 必须早于 validate`) }
+})
+
+test('真实 runner ImageOS 精确 allowlist win25 / win25-vs2026，不接受任意 win 前后缀', async () => {
+  const { validateRunnerProof, runnerProofFailures } = await load()
+  for (const imageOS of ['win25', 'win25-vs2026']) assert.doesNotThrow(() => validateRunnerProof({ ...proof(), imageOS }))
+  for (const imageOS of ['win22', 'win2025', 'win25-vs2025', 'win25-vs2026-extra', 'prefix-win25-vs2026', 'win25-other', 'win25-vs2026\n', '', 'Win25']) {
+    const p = { ...proof(), imageOS }; assert.deepEqual(runnerProofFailures(p), ['image-os']); assert.throws(() => validateRunnerProof(p), /image-os/)
+  }
+  const p = { ...proof(), imageOS: 'win25-vs2026', sid: '' }; assert.throws(() => validateRunnerProof(p), /sid-format/, '新 ImageOS 不绕过真实 SID 门禁')
 })
 
 test('Linux Python Chromium 固定实际发布的 playwright1.58.0，不混用 npm1.58.2', () => {
