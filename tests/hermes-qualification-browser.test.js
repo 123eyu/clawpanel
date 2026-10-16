@@ -80,14 +80,24 @@ test('PM 存在但 fresh11 漏 hash 必须失败（先保留该错误接受的�
 })
 
 test('固定 PM optional inventory：真实存在必须第20项，缺失/篡改/伪造 extra 均拒绝', async () => {
-  const m = await load(), { r, facts } = fixture(m), pm = 'scripts/hermes-pm-runtime.js'
-  assert.equal(m.sourceInventory({ [pm]: { git: false, disk: false } }).length, 19)
-  assert.equal(m.sourceInventory({ [pm]: { git: true, disk: true } }).length, 20)
-  assert.throws(() => m.sourceInventory({ [pm]: { git: true, disk: false } }), 'Git 有、实际文件缺失')
-  assert.throws(() => m.sourceInventory({ [pm]: { git: false, disk: true } }), '未提交模块不得冒充候选 Git blob')
+  const m = await load(), { r, facts } = fixture(m), pm = 'scripts/hermes-pm-runtime.js', ps = 'scripts/hermes-managed-install.ps1'
+  const noPs = { [ps]: { git: false, disk: false } }
+  assert.equal(m.sourceInventory({ ...noPs, [pm]: { git: false, disk: false } }).length, 19)
+  assert.equal(m.sourceInventory({ ...noPs, [pm]: { git: true, disk: true } }).length, 20)
+  assert.throws(() => m.sourceInventory({ ...noPs, [pm]: { git: true, disk: false } }), 'Git 有、实际文件缺失')
+  assert.throws(() => m.sourceInventory({ ...noPs, [pm]: { git: false, disk: true } }), '未提交模块不得冒充候选 Git blob')
+  assert.throws(() => m.sourceInventory({ [pm]: { git: false, disk: false } }), 'PS存在性未知不得默认为不存在')
+  assert.equal(m.sourceInventory({ [pm]: { git: false, disk: false }, [ps]: { git: true, disk: true } }).length, 20)
+  assert.equal(m.sourceInventory({ [pm]: { git: true, disk: true }, [ps]: { git: true, disk: true } }).length, 21)
+  assert.throws(() => m.sourceInventory({ [pm]: { git: true, disk: true }, [ps]: { git: true, disk: false } }))
   const f = clone(facts), report = clone(r)
   f.sourceHashes[pm] = '1'.repeat(64); report.environment.candidateSourceHashes[pm] = f.sourceHashes[pm]
   assert.doesNotThrow(() => m.validateFreshReport(report, f), '合法 PM 候选20项')
+  const bothFacts = clone(f), bothReport = clone(report)
+  bothFacts.sourceHashes[ps] = '4'.repeat(64); bothReport.environment.candidateSourceHashes[ps] = '4'.repeat(64)
+  assert.doesNotThrow(() => m.validateFreshReport(bothReport, bothFacts))
+  delete bothReport.environment.candidateSourceHashes[ps]
+  assert.throws(() => m.validateFreshReport(bothReport, bothFacts), 'PS实际发运但报告漏指纹')
   const missing = clone(report); delete missing.environment.candidateSourceHashes[pm]
   assert.throws(() => m.validateFreshReport(missing, f), 'PM 存在但报告漏 hash')
   const stale = clone(report); stale.environment.candidateSourceHashes[pm] = '2'.repeat(64)

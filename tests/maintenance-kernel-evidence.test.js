@@ -10,7 +10,7 @@ test('真实验收指纹包含实际发运桥与已有认证/网关依赖，预�
  const deps=source.slice(source.indexOf('report.environment.verifierDependencyHashes'),source.indexOf('report.environment.candidateSourceHashes'))
  assert.ok(deps.includes('src/lib/openclaw-gateway-compat.js'))
  // 基线不存在的 PM 不伪造指纹；候选实际发运该模块时必须读取真实文件。
- assert.match(map,/for \(const optional of \['scripts\/hermes-pm-runtime.js'\]\)/)
+ assert.match(map,/for \(const optional of \['scripts\/hermes-pm-runtime.js', 'scripts\/hermes-managed-install.ps1'\]\)/)
  assert.match(map,/fs\.lstatSync\(path\.join\(project, optional\)\); files\.push\(optional\)/)
  assert.match(map,/if \(error\.code !== 'ENOENT'\) throw error/)
  assert.match(map,/isFile\(\) && !stat\.isSymbolicLink\(\)/)

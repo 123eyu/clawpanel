@@ -16,7 +16,7 @@ export const ORIGINAL_SOURCES = Object.freeze({
 })
 export const STAGES = ['candidate-schema', 'isolation', 'web', 'install', 'version', 'config-sync', 'runtime-health', 'chat', 'provider-receipt', 'stop', 'cleanup']
 export const SOURCE_FILES = ['scripts/serve.js', 'scripts/dev-api.js', 'scripts/pi-models.js', 'scripts/opencode.js', 'scripts/opencode-proxy.js', 'scripts/deepseek-harness.js', 'scripts/deepseek-harness-auth.js', 'scripts/deepseek-harness-proxy.js', 'src/lib/opencode-storage-bridge.js', 'src/lib/openclaw-gateway-compat.js', 'src/lib/tauri-api.js', 'src/engines/opencode/pages/workspace.js', 'src/engines/opencode/pages/dashboard.js', 'src/engines/hermes/pages/chat.js', 'package.json', 'package-lock.json', 'openclaw-version-policy.json', 'Dockerfile', '.github/maintenance/Runtime.Dockerfile']
-export const OPTIONAL_SOURCE_FILES = ['scripts/hermes-pm-runtime.js']
+export const OPTIONAL_SOURCE_FILES = ['scripts/hermes-pm-runtime.js', 'scripts/hermes-managed-install.ps1']
 export const DEP_FILES = ['scripts/maintenance-pi-process.mjs', 'src/lib/openclaw-gateway-compat.js']
 const PROOF_KEYS = ['requestedByParent', 'linux', 'dockerMarker', 'nonRoot', 'noNewPrivileges', 'noCapabilities', 'noDockerSocket']
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex')
