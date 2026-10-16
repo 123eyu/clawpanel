@@ -219,17 +219,92 @@ export function actualRunnerProof() {
   return { ...local, platform: process.platform, arch: process.arch, runnerEnvironment: process.env.RUNNER_ENVIRONMENT, runnerOS: process.env.RUNNER_OS, event: process.env.GITHUB_EVENT_NAME, ref: process.env.GITHUB_REF, repository: process.env.GITHUB_REPOSITORY, workflowRef: process.env.GITHUB_WORKFLOW_REF, workflowSha: process.env.GITHUB_WORKFLOW_SHA, toolingSha: git.stdout.trim(), runId: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT, imageOS: process.env.ImageOS, imageVersion: process.env.ImageVersion }
 }
 
+// 只读 reparse point 自身，不跟随/执行 AppExecLink；原始数据读取或普通文件 hash 失败均抛错。
+export function windowsPathFingerprintSource() {
+  return String.raw`
+if(-not ('ClawPanelReparseReader' -as [type])){Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Text;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
+public sealed class ClawPanelReparseFacts {
+  public string ReparseTag, LinkType, Target, PrintName, DataSha256;
+  public uint Version, Flags;
+  public string[] Strings;
+}
+public static class ClawPanelReparseReader {
+  const uint FILE_FLAG_OPEN_REPARSE_POINT=0x00200000, FILE_FLAG_BACKUP_SEMANTICS=0x02000000, FSCTL_GET_REPARSE_POINT=0x000900A8;
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+  static extern SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
+  [DllImport("kernel32.dll",SetLastError=true)]
+  static extern bool DeviceIoControl(SafeFileHandle handle,uint control,IntPtr input,int inputSize,byte[] output,int outputSize,out int returned,IntPtr overlapped);
+  public static byte[] Read(string path) {
+    using(var handle=CreateFileW(path,0,7,IntPtr.Zero,3,FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS,IntPtr.Zero)) {
+      if(handle.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
+      var buffer=new byte[16384];int returned;
+      if(!DeviceIoControl(handle,FSCTL_GET_REPARSE_POINT,IntPtr.Zero,0,buffer,buffer.Length,out returned,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error());
+      if(returned<8||returned>buffer.Length)throw new InvalidDataException("Invalid reparse size");
+      Array.Resize(ref buffer,returned);return buffer;
+    }
+  }
+  static string Utf16(byte[] data,int offset,int length) {
+    if(offset<8||length<0||(length&1)!=0||offset>data.Length-length)throw new InvalidDataException("Invalid reparse string bounds");
+    return new UnicodeEncoding(false,false,true).GetString(data,offset,length);
+  }
+  public static ClawPanelReparseFacts Decode(byte[] data) {
+    if(data==null||data.Length<8)throw new InvalidDataException("Missing reparse header");
+    uint tag=BitConverter.ToUInt32(data,0);int header=(tag&0x80000000)!=0?8:24;
+    if(data.Length!=header+BitConverter.ToUInt16(data,4))throw new InvalidDataException("Invalid reparse data length");
+    var facts=new ClawPanelReparseFacts{ReparseTag="0x"+tag.ToString("x8"),LinkType="Opaque",Strings=new string[0]};
+    using(var hash=SHA256.Create())facts.DataSha256=BitConverter.ToString(hash.ComputeHash(data)).Replace("-","").ToLowerInvariant();
+    if(tag==0x8000001b) {
+      if(data.Length<14||BitConverter.ToUInt32(data,8)<3)throw new InvalidDataException("Invalid AppExecLink header");
+      string text=Utf16(data,12,data.Length-12);
+      if(!text.EndsWith("\0",StringComparison.Ordinal))throw new InvalidDataException("Unterminated AppExecLink");
+      facts.Strings=text.TrimEnd('\0').Split('\0');
+      if(facts.Strings.Length<3||String.IsNullOrEmpty(facts.Strings[0])||String.IsNullOrEmpty(facts.Strings[1])||String.IsNullOrEmpty(facts.Strings[2]))throw new InvalidDataException("Missing AppExecLink target");
+      facts.Version=BitConverter.ToUInt32(data,8);facts.LinkType="AppExecLink";facts.Target=facts.Strings[2];
+    } else if(tag==0xa000000c||tag==0xa0000003) {
+      int start=tag==0xa000000c?20:16;
+      if(data.Length<start)throw new InvalidDataException("Missing link offsets");
+      facts.Target=Utf16(data,start+BitConverter.ToUInt16(data,8),BitConverter.ToUInt16(data,10));
+      facts.PrintName=Utf16(data,start+BitConverter.ToUInt16(data,12),BitConverter.ToUInt16(data,14));
+      facts.LinkType=tag==0xa000000c?"SymbolicLink":"MountPoint";
+      if(tag==0xa000000c)facts.Flags=BitConverter.ToUInt32(data,16);
+    }
+    return facts;
+  }
+}
+'@}
+function Get-ClawPanelPathFingerprint($p){
+  try{$attributes=[IO.File]::GetAttributes($p)}catch [IO.FileNotFoundException]{return [ordered]@{kind='absent';sha256=$null}}catch [IO.DirectoryNotFoundException]{return [ordered]@{kind='absent';sha256=$null}}
+  $item=Get-Item -LiteralPath $p -Force -ErrorAction Stop
+  if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){
+    $r=[ClawPanelReparseReader]::Decode([ClawPanelReparseReader]::Read($p))
+    $metadata=[ordered]@{attributes=[int64]$attributes;bytes=$(if($item.PSIsContainer){$null}else{[int64]$item.Length});createdUtc=$item.CreationTimeUtc.Ticks;modifiedUtc=$item.LastWriteTimeUtc.Ticks;reparseTag=$r.ReparseTag;linkType=$r.LinkType;target=$r.Target;printName=$r.PrintName;flags=$r.Flags;version=$r.Version;strings=@($r.Strings);dataSha256=$r.DataSha256}
+    return [ordered]@{kind='reparse';sha256=$null;reparseTag=$r.ReparseTag;linkType=$r.LinkType;target=$r.Target;metadata=$metadata;metadataSha256=(Get-ClawPanelUtf8Sha256 (ConvertTo-Json -InputObject $metadata -Depth 4 -Compress))}
+  }
+  if($item.PSIsContainer){return [ordered]@{kind='directory';sha256=$null;attributes=[int64]$attributes}}
+  return [ordered]@{kind='file';sha256=(Get-FileHash -LiteralPath $p -Algorithm SHA256 -ErrorAction Stop).Hash;bytes=[int64]$item.Length;attributes=[int64]$attributes}
+}
+`
+}
+
 export function hostSnapshot(proof) {
   const profile64 = Buffer.from(proof.actualProfile).toString('base64')
   const data = ps(`
 $ErrorActionPreference='Stop'
 function Get-ClawPanelUtf8Sha256($s){$h=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($h.ComputeHash([Text.Encoding]::UTF8.GetBytes($s)))).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
+${windowsPathFingerprintSource()}
 $registry=@();foreach($p in @('HKCU:\\Environment','HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment','HKCU:\\Software\\Microsoft\\Command Processor')){if(Test-Path -LiteralPath $p){$k=Get-Item -LiteralPath $p;foreach($n in ($k.GetValueNames()|Sort-Object)){$v=$k.GetValue($n,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);$registry+=@{hive=$p;name=$n;kind=$k.GetValueKind($n).ToString();sha256=(Get-ClawPanelUtf8Sha256 (ConvertTo-Json -InputObject $v -Compress))}}}else{$registry+=@{hive=$p;absent=$true}}}
 $real=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${profile64}'))
 $shells=@();$paths=@($PROFILE.AllUsersAllHosts,$PROFILE.AllUsersCurrentHost,$PROFILE.CurrentUserAllHosts,$PROFILE.CurrentUserCurrentHost,"$real\\.bashrc","$real\\.bash_profile","$real\\.profile","$real\\.zshrc","$real\\Documents\\PowerShell\\profile.ps1","$real\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1")
-foreach($p in ($paths|Sort-Object -Unique)){$exists=Test-Path -LiteralPath $p;$shells+=@{path=$p;exists=$exists;sha256=$(if($exists){(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash}else{$null})}}
+foreach($p in ($paths|Sort-Object -Unique)){$fingerprint=Get-ClawPanelPathFingerprint $p;$shells+=@{path=$p;exists=($fingerprint.kind -ne 'absent');sha256=$fingerprint.sha256;fingerprint=$fingerprint}}
 $launchers=@();$dirs=@(($env:PATH -split ';')+@("$real\\AppData\\Roaming\\npm","$real\\.local\\bin","$real\\.hermes\\bin"))|Sort-Object -Unique
-foreach($d in $dirs){if($d -and (Test-Path -LiteralPath $d)){foreach($f in (Get-ChildItem -LiteralPath $d -File -ErrorAction Stop|Where-Object {$_.Name -match '^(hermes|uv|node|npm|python|git)([.-].*|[0-9.]*\\.exe|\\.cmd|\\.ps1)?$'}|Sort-Object FullName)){$launchers+=@{path=$f.FullName;bytes=$f.Length;sha256=(Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash}}}}
+foreach($d in $dirs){if($d -and (Test-Path -LiteralPath $d)){foreach($f in (Get-ChildItem -LiteralPath $d -File -ErrorAction Stop|Where-Object {$_.Name -match '^(hermes|uv|node|npm|python|git)([.-].*|[0-9.]*\\.exe|\\.cmd|\\.ps1)?$'}|Sort-Object FullName)){$fingerprint=Get-ClawPanelPathFingerprint $f.FullName;$launchers+=@{path=$f.FullName;bytes=$f.Length;sha256=$fingerprint.sha256;fingerprint=$fingerprint}}}}
 @{registry=$registry;shells=$shells;launchers=$launchers;executionPolicy=@(Get-ExecutionPolicy -List|ForEach-Object {@{scope=$_.Scope.ToString();value=$_.ExecutionPolicy.ToString()}})}|ConvertTo-Json -Depth 7`)
   return { ...data, parentEnvSha256: digest(JSON.stringify(Object.entries(process.env).sort())) }
 }

@@ -343,7 +343,8 @@ test('hostSnapshot UTF8 哈希命令使用唯一名称，不删 h alias，保留
   assert.match(source, /sha256=\(Get-ClawPanelUtf8Sha256 \(ConvertTo-Json -InputObject \$v -Compress\)\)/)
   assert.equal((source.match(/Get-ClawPanelUtf8Sha256/g) || []).length, 2, '一处定义和一处循环调用覆盖三个 registry hive')
   assert.doesNotMatch(source, /function H\(|sha256=\(H |Remove-(?:Item|Alias)|Set-Alias|New-Alias/i)
-  for (const canary of ['HKCU:', 'HKLM:', 'Environment', 'Command Processor', 'DoNotExpandEnvironmentNames', 'GetValueKind', 'Get-FileHash', 'Get-ExecutionPolicy -List', 'registry=$registry;shells=$shells;launchers=$launchers;executionPolicy=', 'parentEnvSha256']) assert.ok(source.includes(canary), canary)
+  for (const canary of ['HKCU:', 'HKLM:', 'Environment', 'Command Processor', 'DoNotExpandEnvironmentNames', 'GetValueKind', 'Get-ExecutionPolicy -List', 'registry=$registry;shells=$shells;launchers=$launchers;executionPolicy=', 'parentEnvSha256']) assert.ok(source.includes(canary), canary)
+  const q = await load(); assert.ok((source + q.windowsPathFingerprintSource?.()).includes('Get-FileHash'), '普通文件内容 hash 门禁仍存在')
 })
 
 test('独立 Windows PowerShell canary 复现 H alias 抢占；UTF8/file hash 正确且子环境模块隔离', { skip: process.platform !== 'win32' }, async () => {
@@ -381,6 +382,22 @@ test('独立 Windows PowerShell canary 复现 H alias 抢占；UTF8/file hash �
     assert.equal(core.sha256, expected); assert.equal(desktop.sha256, expected); assert.equal(desktop.version, 5)
     assert.match(desktop.module, /WindowsPowerShell[\\/]v1\.0[\\/]Modules[\\/]Microsoft\.PowerShell\.Utility/i)
     assert.deepEqual(Object.entries(process.env), parentBefore)
+    const q = await load(); assert.equal(typeof q.windowsPathFingerprintSource, 'function')
+    const app = target => {
+      const payload = Buffer.concat([Buffer.from([3, 0, 0, 0]), Buffer.from(`qualification.package\0qualification!App\0${target}\0desktop\0`, 'utf16le')])
+      const header = Buffer.alloc(8); header.writeUInt32LE(0x8000001b); header.writeUInt16LE(payload.length, 4); return Buffer.concat([header, payload])
+    }
+    const a = app('C:\\qualification\\one.exe'), b = app('C:\\qualification\\two.exe'), badLength = Buffer.from(a), badCount = Buffer.from(a)
+    badLength.writeUInt16LE(a.length, 4); badCount.writeUInt32LE(2, 8)
+    const data = Buffer.from(JSON.stringify({ file, a: a.toString('base64'), b: b.toString('base64'), bad: [Buffer.alloc(7), badLength, badCount, a.subarray(0, a.length - 1)].map(v => v.toString('base64')) })).toString('base64')
+    const typedCode = `$ErrorActionPreference='Stop'\n${definition[0]}\n${q.windowsPathFingerprintSource()}\n$input=ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${data}')));$normal=Get-ClawPanelPathFingerprint $input.file;$again=Get-ClawPanelPathFingerprint $input.file;$a=[ClawPanelReparseReader]::Decode([Convert]::FromBase64String($input.a));$b=[ClawPanelReparseReader]::Decode([Convert]::FromBase64String($input.b));$bad=@(foreach($value in $input.bad){try{$null=[ClawPanelReparseReader]::Decode([Convert]::FromBase64String($value));$false}catch{$true}});$locked=[IO.File]::Open($input.file,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None);try{$readError=$null;try{$null=Get-ClawPanelPathFingerprint $input.file}catch{$readError=$_.FullyQualifiedErrorId}}finally{$locked.Dispose()};@{normal=$normal;again=$again;a=$a;b=$b;bad=$bad;readError=$readError}|ConvertTo-Json -Depth 8 -Compress`
+    assert.doesNotMatch(typedCode, /HKCU|HKLM|hostSnapshot|Set-ExecutionPolicy/)
+    const typed = invoke(typedCode)
+    assert.equal(typed.normal.kind, 'file'); assert.equal(typed.normal.sha256.toLowerCase(), expected); assert.deepEqual(typed.normal, typed.again)
+    assert.equal(typed.a.ReparseTag, '0x8000001b'); assert.equal(typed.a.LinkType, 'AppExecLink'); assert.equal(typed.a.Target, 'C:\\qualification\\one.exe')
+    assert.equal(typed.b.Target, 'C:\\qualification\\two.exe'); assert.notEqual(typed.a.DataSha256, typed.b.DataSha256)
+    assert.equal(typed.a.DataSha256, createHash('sha256').update(a).digest('hex')); assert.deepEqual(typed.bad, [true, true, true, true])
+    assert.match(typed.readError, /FileReadError|IOException|UnauthorizedAccess/, '不可读普通文件必须失败，不能记录 null hash 后视为 unchanged')
   } finally {
     assert.equal(path.dirname(fs.realpathSync(tmp)), base)
     fs.unlinkSync(file); fs.rmdirSync(tmp)
@@ -398,4 +415,22 @@ test('私有 ps() 只从子环境副本移除全部大小写 PSModulePath，其�
     assert.deepEqual(options.env, { PATH: 'unchanged-path', HOME: 'unchanged-home', QUALIFICATION_CANARY: 'same' })
     assert.deepEqual(Object.entries(env), before); assert.equal(options.timeout, 30000)
   }
+})
+
+test('typed fingerprint 不过滤 WindowsApps；两处 canary 保留 path/bytes/sha256 并记录类型', async () => {
+  const q = await load(); assert.equal(typeof q.windowsPathFingerprintSource, 'function')
+  const source = q.hostSnapshot.toString(), helper = q.windowsPathFingerprintSource()
+  assert.equal((source.match(/Get-ClawPanelPathFingerprint/g) || []).length, 2, 'shell 和 global launcher 均使用 typed fingerprint')
+  assert.match(source, /fingerprint=\$fingerprint/); assert.match(source, /bytes=\$f\.Length/)
+  assert.doesNotMatch(source, /WindowsApps.*(?:continue|exclude|Where-Object)|Get-FileHash/)
+  for (const value of ['FILE_FLAG_OPEN_REPARSE_POINT', 'FSCTL_GET_REPARSE_POINT', 'metadataSha256', 'ReparseTag', 'Target', 'Get-FileHash', "kind='reparse'", "kind='file'"]) assert.ok(helper.includes(value), value)
+  assert.match(helper, /Get-FileHash[^\n]+-ErrorAction Stop/)
+  assert.doesNotMatch(helper, /FSCTL_SET_REPARSE_POINT|Set-ExecutionPolicy|Set-ItemProperty/)
+})
+
+test('typed reparse 的 tag/target/metadata hash 或类型变化均失败，不以缺 content hash 当 unchanged', async () => {
+  const { assertHostUnchanged } = await load(), fingerprint = { kind: 'reparse', sha256: null, reparseTag: '0x8000001b', linkType: 'AppExecLink', target: 'C:\\qualification\\one.exe', metadataSha256: 'a'.repeat(64) }
+  const before = { launchers: [{ path: 'WindowsApps/python.exe', bytes: 0, sha256: null, fingerprint }] }
+  assert.doesNotThrow(() => assertHostUnchanged(before, structuredClone(before)))
+  for (const patch of [{ reparseTag: '0xa000000c' }, { target: 'C:\\qualification\\two.exe' }, { metadataSha256: 'b'.repeat(64) }, { kind: 'file' }]) assert.throws(() => assertHostUnchanged(before, { launchers: [{ ...before.launchers[0], fingerprint: { ...fingerprint, ...patch } }] }), /宿主/)
 })
