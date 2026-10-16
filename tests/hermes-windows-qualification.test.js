@@ -192,7 +192,7 @@ test('Windows file URL preload 实际子进程保留 PID、stdout 和非零退�
 
 test('产物仅上传新公开副本，不带 HOME/env/caches，日志与 trace 随机 Gateway key 脱敏且原件保留', async () => {
   const { publishEvidence } = await load(); assert.equal(typeof publishEvidence, 'function')
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-publication-contract-'))
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'hermes-publication-contract-'))
   try {
     const raw = path.join(tmp, 'raw'), output = path.join(tmp, 'public'), key = 'random-gateway-contract-7e282ce1234'
     fs.mkdirSync(path.join(raw, 'h/.hermes'), { recursive: true }); fs.mkdirSync(path.join(raw, 'runtime/home'), { recursive: true })
@@ -222,5 +222,42 @@ test('workflow 只上传脱敏 public 副本；导出供 native 严格复用而�
     assert.equal(job.steps[publish].if, 'always()')
     assert.match(job.steps[upload].with.path, /hermes-public-/)
     assert.doesNotMatch(job.steps[upload].with.path, /hermes-qualification-/)
+  }
+})
+
+test('testjob-envcontext: job env 禁用 runner.temp；step 写 GITHUB_ENV，artifact 路径仍合法', () => {
+  const w = YAML.parse(fs.readFileSync(path.join(root, '.github/workflows/hermes-qualification.yml'), 'utf8'))
+  for (const job of Object.values(w.jobs)) assert.doesNotMatch(JSON.stringify(job.env || {}), /\$\{\{\s*runner\./, 'job-level env 没有 runner 上下文；GitHub dispatch 会返回422')
+  const job = w.jobs['linux-long-ui']
+  assert.equal(job.env.EVIDENCE, undefined); assert.equal(job.env.PLAYWRIGHT_BROWSERS_PATH, undefined)
+  const init = job.steps.findIndex(s => s.id === 'runtime_paths')
+  const use = job.steps.findIndex(s => s.run?.includes('test ! -e "$EVIDENCE"'))
+  assert.ok(init >= 0 && init < use, '使用证据路径之前先通过 step 写入 GITHUB_ENV')
+  const run = job.steps[init].run
+  assert.match(run, /printf 'EVIDENCE=%s\/hermes-qualification-%s\\n' "\$RUNNER_TEMP" "\$VARIANT" >> "\$GITHUB_ENV"/)
+  assert.match(run, /printf 'PLAYWRIGHT_BROWSERS_PATH=%s\/hermes-browser-cache\\n' "\$RUNNER_TEMP" >> "\$GITHUB_ENV"/)
+  for (const j of [w.jobs.qualify, job]) assert.equal(j.steps.find(s => s.uses?.startsWith('actions/upload-artifact@')).with.path, '${{ runner.temp }}/hermes-public-${{ matrix.variant }}/')
+})
+
+test('publication fixture 先规范系统 tmp 物理路径，覆盖 mac /var 到 /private/var 别名', () => {
+  const source = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  assert.match(source, /fs\.mkdtempSync\(path\.join\(fs\.realpathSync\(os\.tmpdir\(\)\), 'hermes-publication-contract-'\)\)/)
+})
+
+test('publication 保留真实 symlink/junction 拒绝：输入或输出祖先为链接均失败', async () => {
+  const { publishEvidence } = await load(), base = fs.realpathSync(os.tmpdir())
+  const tmp = fs.mkdtempSync(path.join(base, 'hermes-publication-symlink-')), actual = path.join(tmp, 'actual'), alias = path.join(tmp, 'alias')
+  try {
+    fs.mkdirSync(actual); fs.writeFileSync(path.join(actual, 'report.json'), '{"status":"failed"}')
+    fs.symlinkSync(actual, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    const output = path.join(tmp, 'public')
+    await assert.rejects(publishEvidence({ roots: { web: alias }, output }), /reparse|symlink/)
+    assert.equal(fs.existsSync(output), false)
+    await assert.rejects(publishEvidence({ roots: { web: actual }, output: path.join(alias, 'public') }), /reparse|symlink/)
+    assert.equal(fs.existsSync(path.join(actual, 'public')), false)
+  } finally {
+    if (fs.existsSync(alias)) fs.unlinkSync(alias)
+    const relative = path.relative(base, fs.realpathSync(tmp)); assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative))
+    fs.rmSync(tmp, { recursive: true, force: true })
   }
 })

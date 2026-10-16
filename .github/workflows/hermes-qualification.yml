@@ -122,9 +122,12 @@ jobs:
       CANDIDATE_SHA: ${{ matrix.sha }}
       EXPECTED_VERSION: ${{ matrix.version }}
       VARIANT: ${{ matrix.variant }}
-      EVIDENCE: ${{ runner.temp }}/hermes-qualification-${{ matrix.variant }}
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/hermes-browser-cache
     steps:
+      - name: 初始化本 job 的临时证据和浏览器路径
+        id: runtime_paths
+        run: |
+          printf 'EVIDENCE=%s/hermes-qualification-%s\n' "$RUNNER_TEMP" "$VARIANT" >> "$GITHUB_ENV"
+          printf 'PLAYWRIGHT_BROWSERS_PATH=%s/hermes-browser-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: tooling
