@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
 import time
 import traceback
 from urllib.parse import urlsplit
@@ -50,11 +51,147 @@ def validate_base_url(value):
     return value.rstrip('/')
 
 
+# 宿主测试字体证据：不安装字体，不修改CSS/DOM，不把cmap声明代替实际渲染。
+def parse_fc_charset(value):
+    assert isinstance(value, str) and value.strip(), 'fontconfig charset缺失'
+    rows, end = [], -1
+    for word in value.split():
+        assert re.fullmatch(r'[0-9a-fA-F]+(?:-[0-9a-fA-F]+)?', word), 'fontconfig charset格式'
+        parts = word.split('-'); first = int(parts[0], 16); last = int(parts[-1], 16)
+        assert end < first <= last <= 0x10ffff, 'fontconfig charset范围/次序'
+        rows.append((first, last)); end = last
+    return rows
+
+
+def font_command(args):
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, encoding='utf-8', timeout=15, check=False)
+        assert len(result.stdout.encode('utf-8')) <= 4 * 1024 * 1024, '字体metadata输出超限'
+        return {'args': args, 'exitCode': result.returncode, 'stdout': result.stdout, 'error': redact(result.stderr)}
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {'args': args, 'exitCode': 127, 'stdout': '', 'error': redact(error)}
+
+
+def fingerprint_font_file(file):
+    file = Path(file)
+    assert file.is_absolute() and file.is_file() and not file.is_symlink(), '字体文件类型/路径'
+    assert file.resolve().is_relative_to('/usr/share/fonts') and file.resolve() == file, '字体不是宿主包字体/路径链接'
+    h = hashlib.sha256()
+    with file.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(65536), b''):
+            h.update(chunk)
+    return {'file': str(file), 'sha256': h.hexdigest(), 'bytes': file.stat().st_size}
+
+
+def font_environment(phase):
+    assert phase in ('before', 'after')
+    commands = {
+        'packages': font_command(['dpkg-query', '-W', '-f', '${Package}\t${Version}\n', 'fontconfig', 'fonts-noto-cjk']),
+        'origin': font_command(['apt-cache', 'policy', 'fontconfig', 'fonts-noto-cjk']),
+        'fontconfig': font_command(['fc-list', ':lang=zh-cn', '--format', '%{file}\t%{index}\t%{family}\n']),
+        'files': font_command(['dpkg-query', '-L', 'fonts-noto-cjk']),
+    }
+    result = {'schemaVersion': 1, 'scope': 'host-fontconfig-environment-not-product-fix', 'phase': phase,
+              'platform': sys.platform, 'capturedAt': utc(), 'commands': commands, 'faces': [],
+              'osRelease': Path('/etc/os-release').read_text() if Path('/etc/os-release').is_file() else ''}
+    if phase == 'after':
+        assert sys.platform == 'linux' and all(c['exitCode'] == 0 for c in commands.values()), '字体包/fontconfig准备失败'
+        packages = dict(row.split('\t', 1) for row in commands['packages']['stdout'].splitlines())
+        assert all(packages.get(name) for name in ('fontconfig', 'fonts-noto-cjk')), '字体包版本缺失'
+        result['packages'] = packages
+    for name in sorted(set(commands['files']['stdout'].splitlines())):
+        if not name.lower().endswith(('.ttc', '.otf', '.ttf')):
+            continue
+        fingerprint = fingerprint_font_file(name)
+        query = font_command(['fc-query', '--format', '%{index}\t%{family}\t%{postscriptname}\t%{charset}\n', name])
+        assert query['exitCode'] == 0, 'fc-query实际字体失败'
+        for line in query['stdout'].splitlines():
+            index, family, postscript, charset = line.split('\t', 3)
+            assert index.isdigit() and family and postscript, '字体face身份缺失'
+            parse_fc_charset(charset)
+            result['faces'].append({**fingerprint, 'index': int(index), 'family': family, 'postscriptName': postscript, 'charset': charset})
+    if phase == 'after':
+        assert result['faces'], '未发现实际Noto CJK字体face'
+    return result
+
+
+def read_font_environment(directory):
+    root = Path(directory).absolute()
+    assert not root.is_symlink()
+    snapshots, hashes = {}, {}
+    for phase in ('before', 'after'):
+        file = root / ('fontconfig-' + phase + '.json')
+        assert file.is_file() and not any(p.is_symlink() for p in [file, *file.parents]), '字体环境收据路径'
+        raw = file.read_bytes(); snapshots[phase] = json.loads(raw); hashes[phase + 'Sha256'] = hashlib.sha256(raw).hexdigest()
+        assert snapshots[phase]['phase'] == phase and snapshots[phase]['schemaVersion'] == 1
+    after = snapshots['after']
+    assert after['platform'] == 'linux' and after['faces'] and all(c['exitCode'] == 0 for c in after['commands'].values())
+    assert all(after['packages'].get(name) for name in ('fontconfig', 'fonts-noto-cjk'))
+    checked = set()
+    for face in after['faces']:
+        parse_fc_charset(face['charset'])
+        if face['file'] not in checked:
+            actual = fingerprint_font_file(face['file']); assert actual['sha256'] == face['sha256'] and actual['bytes'] == face['bytes'], '字体安装后字节漂移'
+            checked.add(face['file'])
+    return {**hashes, 'faces': after['faces'], 'rootCause': 'font remediation pending real screenshot review; not established by cmap alone'}
+
+
+def assert_cjk_coverage(text, platform_fonts, faces):
+    points = sorted({ord(c) for c in text if 0x3400 <= ord(c) <= 0x9fff or 0x20000 <= ord(c) <= 0x323af})
+    assert points, '真实回复缺中文样本'
+    assert isinstance(platform_fonts, list) and platform_fonts, '缺实际CDP字体'
+    used = [f for f in platform_fonts if type(f.get('glyphCount')) in (int, float)
+            and math.isfinite(f['glyphCount']) and f['glyphCount'] > 0 and f['glyphCount'] == int(f['glyphCount'])
+            and f.get('isCustomFont') is False]
+    matched = [f for f in faces if any(p.get('postScriptName') == f['postscriptName'] for p in used)]
+    ranges = [r for f in matched for r in parse_fc_charset(f['charset'])]
+    missing = [format(c, 'x') for c in points if not any(a <= c <= b for a, b in ranges)]
+    assert matched and not missing, '实际渲染字体缺中文glyph覆盖: ' + ','.join(missing)
+    assert all(re.fullmatch('[a-f0-9]{64}', f['sha256']) for f in matched), '实际字体文件hash缺失'
+    return {'textSha256': hashlib.sha256(text.encode()).hexdigest(), 'codepoints': [format(c, 'x') for c in points],
+            'missingCodepoints': missing, 'platformFonts': platform_fonts, 'matchedFaces': matched}
+
+
+def capture_cjk_sample(page, locator, text, label, screenshot, faces):
+    actual = locator.evaluate("""e => { const parts=[]; for(let n=e;n;n=n.parentElement){const p=n.parentElement;parts.unshift(n.localName+(p?':nth-child('+(Array.from(p.children).indexOf(n)+1)+')':''))} const r=e.getBoundingClientRect();return {text:e.innerText,selector:parts.join(' > '),visible:r.width>0&&r.height>0,fontFamily:getComputedStyle(e).fontFamily} }""")
+    assert actual['text'] == text and actual['visible'], '不是实际可见完整中文回复'
+    session = page.context.new_cdp_session(page)
+    try:
+        session.send('DOM.enable'); session.send('CSS.enable')
+        doc = session.send('DOM.getDocument', {'depth': 0})
+        node = session.send('DOM.querySelector', {'nodeId': doc['root']['nodeId'], 'selector': actual['selector']})
+        assert node['nodeId'] > 0, '实际回复DOM节点缺失'
+        fonts = session.send('CSS.getPlatformFontsForNode', {'nodeId': node['nodeId']})['fonts']
+        proof = assert_cjk_coverage(text, fonts, faces)
+    finally:
+        session.detach()
+    screenshot = Path(screenshot)
+    assert screenshot.is_file() and not screenshot.is_symlink(), '实际截图PNG缺失'
+    raw = screenshot.read_bytes(); assert raw[:8] == bytes.fromhex('89504e470d0a1a0a'), '实际截图PNG缺失'
+    return {**proof, 'label': label, 'selector': actual['selector'], 'computedFontFamily': actual['fontFamily'],
+            'screenshot': Path(screenshot).name, 'screenshotSha256': hashlib.sha256(raw).hexdigest()}
+
+
+def validate_cjk_report(proof, texts=None):
+    assert proof['required'] is True and len(proof['samples']) == 2
+    assert [s['label'] for s in proof['samples']] == ['reply', 'restarted']
+    for key in ('beforeSha256', 'afterSha256'):
+        assert re.fullmatch('[a-f0-9]{64}', proof['environment'][key]), '字体环境hash缺失'
+    for i, sample in enumerate(proof['samples']):
+        assert sample['missingCodepoints'] == [] and re.fullmatch('[a-f0-9]{64}', sample['screenshotSha256'])
+        text = texts[i] if texts else ''.join(chr(int(c, 16)) for c in sample['codepoints'])
+        recomputed = assert_cjk_coverage(text, sample['platformFonts'], proof['environment']['faces'])
+        assert sample['codepoints'] == recomputed['codepoints']
+        if texts:
+            assert sample['textSha256'] == recomputed['textSha256'], '字体证明未绑定本轮回复'
+
+
 def parse_options(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--base-url', required=True)
     p.add_argument('--output', required=True)
     p.add_argument('--hold', type=int, default=210)
+    p.add_argument('--font-environment', help='host准备的fontconfig before/after证据目录；不预建本轮output')
     a = p.parse_args(argv)
     try:
         a.base_url = validate_base_url(a.base_url)
@@ -149,6 +286,8 @@ def validate_report(r):
         nonces.append(n)
         assert send['method'] == 'button.click', '必须实际 Send 按钮'
         assert send['reply'] == full_reply(n) and send['fullReplyVisible'] is True
+    if r.get('cjk', {}).get('required'):
+        validate_cjk_report(r['cjk'], [send['reply'] for send in r['sends']])
     provider = r['provider']
     assert type(provider['afterSequence']) is int and provider['afterSequence'] >= 0
     receipts = provider['receipts']
@@ -209,6 +348,7 @@ def run(a):
          'scriptSha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
          'hold': {'seconds': a.hold, 'health': []}, 'lifecycle': {}, 'sends': [],
          'limitations': ['不安装runtime；warm不是fresh；不归因本机异常signal；不覆盖Tauri；不是releaseReady']}
+    r['cjk'] = {'required': bool(getattr(a, 'font_environment', None)), 'samples': [], 'status': 'not-requested'}
     browser = context = page = None
 
     def save():
@@ -216,6 +356,10 @@ def run(a):
 
     try:
         # host readiness：只需 Playwright 模块和预装 Chromium；不在脚本里 pip/install。
+        font_faces = []
+        if r['cjk']['required']:
+            environment = read_font_environment(a.font_environment); font_faces = environment.pop('faces')
+            r['cjk'].update(environment={**environment, 'faces': []}, status='pending-actual-rendering')
         import playwright
         from playwright.sync_api import sync_playwright, expect
         from importlib.metadata import version
@@ -304,6 +448,10 @@ def run(a):
                 reply = send(nonce)
                 r['steps'].append(expected_steps(a.hold)[1])
                 page.screenshot(path=str(out / 'reply.png'))
+                if r['cjk']['required']:
+                    sample = capture_cjk_sample(page, page.get_by_text(reply, exact=True).last, reply, 'reply', out / 'reply.png', font_faces)
+                    r['cjk']['samples'].append(sample); r['cjk']['environment']['faces'] = sample['matchedFaces']
+                    save()
                 page.reload(wait_until='domcontentloaded')
                 online()
                 expect(page.get_by_text(reply, exact=True).last).to_be_visible(timeout=60000)
@@ -347,6 +495,13 @@ def run(a):
                 reply2 = send('browser-acceptance-' + str(uuid.uuid4()))
                 r['steps'].append(expected_steps(a.hold)[6])
                 page.screenshot(path=str(out / 'restarted.png'))
+                if r['cjk']['required']:
+                    sample = capture_cjk_sample(page, page.get_by_text(reply2, exact=True).last, reply2, 'restarted', out / 'restarted.png', font_faces)
+                    r['cjk']['samples'].append(sample)
+                    known = {(f['file'], f['index']) for f in r['cjk']['environment']['faces']}
+                    r['cjk']['environment']['faces'].extend(f for f in sample['matchedFaces'] if (f['file'], f['index']) not in known)
+                    r['cjk']['status'] = 'cmap-and-actual-fonts-verified-png-review-pending'
+                    save()
                 api('hermes_gateway_action', {'action': 'stop'})
                 r['lifecycle']['finalStop'] = stopped()
                 expect(page.get_by_text(reply, exact=True).last).to_be_visible(timeout=10000)
