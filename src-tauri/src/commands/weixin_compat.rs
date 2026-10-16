@@ -8,13 +8,23 @@ fn policy() -> Value {
 
 fn version_parts(value: &str) -> Option<[u32; 3]> {
     let value = value.trim();
-    let value = value
-        .strip_prefix('v')
-        .unwrap_or(value)
-        .split("-zh.")
-        .next()?;
+    let value = value.strip_prefix('v').unwrap_or(value);
+    let value = if let Some((core, suffix)) = value.split_once("-zh.") {
+        if suffix.is_empty()
+            || !suffix.chars().all(|c| c.is_ascii_digit())
+            || suffix.parse::<u32>().is_err()
+        {
+            return None;
+        }
+        core
+    } else {
+        value
+    };
     let core = if let Some((core, suffix)) = value.split_once('-') {
-        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+        if suffix.is_empty()
+            || !suffix.chars().all(|c| c.is_ascii_digit())
+            || suffix.parse::<u32>().is_err()
+        {
             return None;
         }
         core

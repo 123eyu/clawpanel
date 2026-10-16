@@ -3,9 +3,11 @@ import fs from 'node:fs'
 // 与桌面端共用已核实的发布包边界，不跟随可变 latest 将旧内核升级到不兼容插件。
 const policy = JSON.parse(fs.readFileSync(new URL('../src/lib/weixin-compat-policy.json', import.meta.url), 'utf8'))
 function versionParts(value) {
-  const match = String(value || '').trim().replace(/^v/, '').replace(/-zh\..*$/, '').match(/^(\d+)\.(\d+)\.(\d+)(?:-\d+)?$/)
-  const parts = match && match.slice(1).map(Number)
-  return parts && parts.every(n => Number.isSafeInteger(n) && n <= 0xffffffff) ? parts : null
+  // 汉化后缀同样必须是已知的数字修订，不能截掉未知 preview 后把它当稳定版。
+  const match = String(value || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-(\d+))?(?:-zh\.(\d+))?$/)
+  if (!match) return null
+  const parts = match.slice(1).filter(part => part !== undefined).map(Number)
+  return parts.every(n => Number.isSafeInteger(n) && n <= 0xffffffff) ? parts.slice(0, 3) : null
 }
 function pluginParts(value) {
   const text = String(value || '').trim()

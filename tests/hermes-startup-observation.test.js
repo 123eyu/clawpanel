@@ -24,8 +24,10 @@ if(${oversized}) lines.push('CLAWPANEL_HERMES_PHASE '+ 'x'.repeat(12000));
 for(const n of (${reordered} ? [1,3,2,4] : Array.from({length:${count}},(_,i)=>i+1))) lines.push('CLAWPANEL_HERMES_PHASE '+JSON.stringify(good(n)));
 const text=lines.join('\\r\\n')+'\\r\\n';
 process.stdout.write('original-stdout');
-const bytes=Buffer.from(text);for(let offset=0;offset<bytes.length;offset+=17)process.stderr.write(bytes.subarray(offset,offset+17));
-process.send({event:'ready',text});process.on('message',()=>process.exit(7));
+const bytes=Buffer.from(text),cut=bytes.indexOf(Buffer.from('中'))+1;
+process.stderr.write(bytes.subarray(0,cut));
+setTimeout(()=>{for(let offset=cut;offset<bytes.length;offset+=17)process.stderr.write(bytes.subarray(offset,offset+17));process.send({event:'ready',text})},40);
+process.on('message',()=>process.exit(7));
 setTimeout(()=>process.exit(79),5000).unref();
 `)
   fs.writeFileSync(worker, `
@@ -33,10 +35,10 @@ import fs from 'node:fs';import {spawn} from 'node:child_process';
 const append=fs.appendFileSync;
 if(${writeFailure}) fs.appendFileSync=function(file,data,...args){if(String(data).includes('"event":"hermes-phase"')) throw Error('fixture-phase-write-failure');return Reflect.apply(append,this,[file,data,...args])};
 const c=spawn(process.execPath,[${JSON.stringify(child)}],{stdio:['ignore','pipe','pipe','ipc']});
-let out='',err='';c.stdout.on('data',d=>out+=d);c.stderr.on('data',d=>err+=d);
+let out=[],err=[];c.stdout.on('data',d=>out.push(d));c.stderr.on('data',d=>err.push(d));
 let readback=null;
 c.on('message',async message=>{if(message.event!=='ready')return;const end=Date.now()+1200;let rows=[];do{rows=fs.readFileSync(${JSON.stringify(log)},'utf8').trim().split('\\n').map(s=>JSON.parse(s));if(rows.some(r=>r.event==='hermes-phase')||${JSON.stringify(enabled !== '1' || writeFailure)})break;await new Promise(r=>setTimeout(r,10))}while(Date.now()<end);readback={beforeClose:rows.every(r=>r.event!=='close'),phaseBeforeClose:rows.some(r=>r.event==='hermes-phase'),childStillAlive:c.exitCode===null,expectedStderr:message.text};c.send('done')});
-c.on('close',code=>console.log(JSON.stringify({code,out,err,readback})));c.on('error',()=>process.exitCode=91);
+c.on('close',code=>console.log(JSON.stringify({code,out:Buffer.concat(out).toString('utf8'),err:Buffer.concat(err).toString('utf8'),readback})));c.on('error',()=>process.exitCode=91);
 `)
   const env = { ...process.env }; delete env.CLAWPANEL_HERMES_PHASE_TIMING
   if (enabled !== undefined) env.CLAWPANEL_HERMES_PHASE_TIMING = enabled
@@ -46,6 +48,7 @@ c.on('close',code=>console.log(JSON.stringify({code,out,err,readback})));c.on('e
   assert.equal(result.code, 7); assert.equal(result.out, 'original-stdout'); assert.equal(result.err, result.readback.expectedStderr)
   const lifecycle = receipts.filter(r => r.event === 'start' || r.event === 'close')
   assert.equal(lifecycle.length, 2); assert.equal(lifecycle[1].exitCode, 7); assert.equal(lifecycle[0].pid, lifecycle[1].pid)
+  assert.equal(lifecycle[1].stdout, result.out); assert.equal(lifecycle[1].stderr, result.readback.expectedStderr)
   assert.equal(result.readback.beforeClose, true); assert.equal(result.readback.childStillAlive, true)
   return { result, phases: receipts.filter(r => r.event === 'hermes-phase'), childPid: lifecycle[0].pid }
 }
