@@ -8,6 +8,7 @@ import crypto from 'node:crypto'
 import YAML from 'yaml'
 import { buildArgs } from '../scripts/test-hermes-compat-build.mjs'
 import { nativeArgs } from '../scripts/test-hermes-tauri-qualification.mjs'
+import { webCompatibilityArgs } from '../scripts/test-hermes-web-compatibility.mjs'
 import { assertSameSource, assertHostUnchanged } from '../scripts/test-hermes-windows-qualification.mjs'
 
 const file = new URL('../.github/workflows/hermes-qualification.yml', import.meta.url)
@@ -17,10 +18,10 @@ const step = id => { const s = steps().find(s => s.id === id); assert.ok(s, '缺
 const oldSha = 'b'.repeat(40), newSha = 'a'.repeat(40), hash = f => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex')
 
 test('失败清单：只有 old+both 且旧版 full native 成功才 checkout/build/run 兼容链', () => {
-  const all = steps(), ids = ['native', 'compat_checkout', 'compat_build', 'native_compatibility', 'native_summary']
+  const all = steps(), ids = ['native', 'compat_checkout', 'compat_build', 'web_compatibility', 'native_compatibility', 'native_summary']
   const positions = ids.map(id => all.indexOf(step(id)))
   assert.deepEqual(positions, [...positions].sort((a, b) => a - b))
-  for (const id of ids.slice(1, 4)) {
+  for (const id of ids.slice(1, 5)) {
     const s = step(id)
     assert.match(s.if, /matrix\.variant == 'old'/); assert.match(s.if, /inputs\.target == 'both'/)
     assert.match(s.if, /steps\.native\.outcome == 'success'/)
@@ -30,6 +31,14 @@ test('失败清单：只有 old+both 且旧版 full native 成功才 checkout/bu
   assert.match(checkout.uses, /^actions\/checkout@[a-f0-9]{40}$/)
   assert.equal(checkout.with.ref, '${{ inputs.candidate_sha }}'); assert.equal(checkout.with.path, 'candidate-compat')
   assert.equal(checkout.with['persist-credentials'], false)
+})
+
+test('新Web旧内核必须运行原CLI，复用相同seed/build且不重装工具', () => {
+  const s = step('web_compatibility')
+  assert.equal(s.shell, 'pwsh'); assert.equal(s.env.CANDIDATE_SHA, '${{ inputs.candidate_sha }}'); assert.equal(s.env.SEED_SHA, '${{ matrix.sha }}')
+  const args = webCompatibilityArgs(commandArgs(s, 'test-hermes-web-compatibility.mjs'))
+  assert.deepEqual(args, { '--execute': true, '--root': 'candidate-compat', '--sha': newSha, '--seed-sha': oldSha, '--web-output': 'C:/runner temp/hermes-qualification-old', '--build-output': 'C:/runner temp/hermes-native-build-old-runtime-compatibility', '--output': 'C:/runner temp/hermes-web-old-runtime-compatibility' })
+  assert.doesNotMatch(s.run, /npm install|cargo|rustup|--hold|--force|continue-on-error/)
 })
 
 function commandArgs(s, script) {
@@ -74,8 +83,10 @@ function summaryFixture(t, target = 'both') {
   const buildFile = at('hermes-native-build-old-runtime-compatibility', 'build-receipt.json'); write(buildFile, build)
   const compatibility = { status: 'passed-native-old-runtime-compatibility', candidateSha: newSha, seedSha: oldSha, expectedVersion: '0.21.5', fixtureComplete: true, application: build.application, webQualification: { sha256: build.seedWebReportSha256 }, compatibility: { binding: { buildReceiptSha256: hash(buildFile), sourceManifestSha256: build.sourceManifestSha256, sourceHashes: files, application: build.application } } }
   write(at('hermes-native-old-runtime-compatibility', 'report.json'), compatibility)
+  const webCompat = { status: 'passed-web-old-runtime-compatibility', candidateSha: newSha, seedSha: oldSha, runtimeVersion: '0.21.5', fixtureComplete: true, applicationSha256: build.application.sha256, sourceManifestSha256: build.sourceManifestSha256, seedWebReportSha256: build.seedWebReportSha256, seedNativeReportSha256: build.seedNativeReportSha256, buildReportSha256: hash(buildFile) }
+  write(at('hermes-web-old-runtime-compatibility', 'report.json'), webCompat)
   write(at('hermes-native-build-old', 'build-receipt.json'), { status: 'passed', candidateSha: oldSha, application: native.application })
-  for (const [p, names] of Object.entries({ 'hermes-qualification-old': ['host-before.json'], 'hermes-native-old': ['host-after.json'], 'hermes-native-build-old-runtime-compatibility': ['host-before.json', 'host-after.json'], 'hermes-native-old-runtime-compatibility': ['host-before.json', 'host-after.json'] })) for (const f of names) write(at(p, f), { registry: 'unchanged', parentEnvSha256: p })
+  for (const [p, names] of Object.entries({ 'hermes-qualification-old': ['host-before.json'], 'hermes-native-old': ['host-after.json'], 'hermes-native-build-old-runtime-compatibility': ['host-before.json', 'host-after.json'], 'hermes-native-old-runtime-compatibility': ['host-before.json', 'host-after.json'], 'hermes-web-old-runtime-compatibility': ['host-before.json', 'host-after.json'] })) for (const f of names) write(at(p, f), { registry: 'unchanged', parentEnvSha256: p })
   for (const f of ['test-hermes-tauri-qualification.mjs', 'test-hermes-windows-qualification.mjs', 'test-hermes-compat-build.mjs']) { const p = path.join(root, 'tooling/scripts', f); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, 'trusted fixture tooling hash') }
   const calls = []
   function run() {
@@ -85,7 +96,8 @@ function summaryFixture(t, target = 'both') {
     const scopedPath = { ...path, resolve: (...p) => path.resolve(root, ...p) }
     const assertNativeComplete = r => { calls.push('full'); assert.equal(r.fixtureComplete, true) }
     const assertNativeCompatibilityComplete = r => { calls.push('compat'); assert.equal(r.fixtureComplete, true); assert.equal(r.status, 'passed-native-old-runtime-compatibility') }
-    new Function('fs', 'path', 'assert', 'crypto', 'process', 'console', 'assertSameSource', 'assertHostUnchanged', 'assertNativeComplete', 'assertNativeCompatibilityComplete', body)(scopedFs, scopedPath, assert, crypto, process, { log() {} }, assertSameSource, assertHostUnchanged, assertNativeComplete, assertNativeCompatibilityComplete)
+    const assertWebCompatibilityComplete = r => { calls.push('web-compat'); assert.equal(r.fixtureComplete, true); assert.equal(r.status, 'passed-web-old-runtime-compatibility') }
+    new Function('fs', 'path', 'assert', 'crypto', 'process', 'console', 'assertSameSource', 'assertHostUnchanged', 'assertNativeComplete', 'assertNativeCompatibilityComplete', 'assertWebCompatibilityComplete', body)(scopedFs, scopedPath, assert, crypto, process, { log() {} }, assertSameSource, assertHostUnchanged, assertNativeComplete, assertNativeCompatibilityComplete, assertWebCompatibilityComplete)
     return { code: process.exitCode, report: JSON.parse(fs.readFileSync(at('hermes-summary-old', 'qualification-summary.json'))), calls }
   }
   return { root, source, at, write, build, compatibility, run }
@@ -95,9 +107,21 @@ test('both 旧 job 汇总必须调用兼容完整门禁，并绑定独立 build/
   assert.equal(step('native_summary').env.TARGET, '${{ inputs.target }}')
   assert.equal(step('native_summary').env.COMPAT_CANDIDATE_SHA, '${{ inputs.candidate_sha }}')
   const f = summaryFixture(t), r = f.run()
-  assert.equal(r.code, 0, r.report.error); assert.ok(r.calls.includes('compat')); assert.equal(r.report.nativeCompatibility.status, 'passed-native-old-runtime-compatibility')
+  assert.equal(r.code, 0, r.report.error); assert.ok(r.calls.includes('compat')); assert.ok(r.calls.includes('web-compat')); assert.equal(r.report.nativeCompatibility.status, 'passed-native-old-runtime-compatibility')
+  assert.equal(r.report.webCompatibility.status, 'passed-web-old-runtime-compatibility')
   for (const key of ['buildSha256', 'nativeSha256', 'sourceManifestSha256']) assert.match(r.report.nativeCompatibility.evidence[key], /^[a-f0-9]{64}$/)
 })
+
+for (const fault of ['missing-web', 'incomplete-web', 'web-source-sha', 'web-build-hash', 'web-host-drift']) {
+  test('both旧job拒绝Web兼容缺口 ' + fault, t => {
+    const f = summaryFixture(t), file = f.at('hermes-web-old-runtime-compatibility', 'report.json')
+    const r = JSON.parse(fs.readFileSync(file))
+    if (fault === 'missing-web') fs.unlinkSync(file)
+    else if (fault === 'web-host-drift') f.write(f.at('hermes-web-old-runtime-compatibility', 'host-after.json'), { registry: 'mutated' })
+    else { if (fault === 'incomplete-web') r.fixtureComplete = false; if (fault === 'web-source-sha') r.candidateSha = oldSha; if (fault === 'web-build-hash') r.buildReportSha256 = '0'.repeat(64); f.write(file, r) }
+    const actual = f.run(); assert.equal(actual.code, 1); assert.equal(actual.report.status, 'failed')
+  })
+}
 
 for (const fault of ['missing-native', 'missing-build', 'missing-manifest', 'incomplete-native', 'wrong-seed', 'wrong-new-sha', 'source-drift', 'exe-drift', 'manifest-drift', 'host-drift', 'missing-host']) {
   test('失败清单：both 旧 job 拒绝 ' + fault, t => {

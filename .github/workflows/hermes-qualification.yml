@@ -232,6 +232,16 @@ jobs:
         run: |
           node tooling/scripts/test-hermes-compat-build.mjs --execute --root candidate-compat --sha "$env:CANDIDATE_SHA" --seed-sha "$env:SEED_SHA" --web-output "$env:RUNNER_TEMP/hermes-qualification-old" --native-output "$env:RUNNER_TEMP/hermes-native-old" --output "$env:RUNNER_TEMP/hermes-native-build-old-runtime-compatibility"
           exit $LASTEXITCODE
+      - name: 新应用Web操控既有0.21.5，真实Chromium且禁止内核安装
+        id: web_compatibility
+        if: matrix.variant == 'old' && inputs.target == 'both' && steps.native.outcome == 'success'
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          SEED_SHA: ${{ matrix.sha }}
+        run: |
+          node tooling/scripts/test-hermes-web-compatibility.mjs --execute --root candidate-compat --sha "$env:CANDIDATE_SHA" --seed-sha "$env:SEED_SHA" --web-output "$env:RUNNER_TEMP/hermes-qualification-old" --build-output "$env:RUNNER_TEMP/hermes-native-build-old-runtime-compatibility" --output "$env:RUNNER_TEMP/hermes-web-old-runtime-compatibility"
+          exit $LASTEXITCODE
       - name: 新应用操控既有 0.21.5，两轮真实 native（禁止内核安装生命周期）
         id: native_compatibility
         if: matrix.variant == 'old' && inputs.target == 'both' && steps.native.outcome == 'success'
@@ -256,10 +266,12 @@ jobs:
           @'
           import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import crypto from 'node:crypto';
           import {assertSameSource,assertHostUnchanged} from './tooling/scripts/test-hermes-windows-qualification.mjs';import {assertNativeComplete,assertNativeCompatibilityComplete} from './tooling/scripts/test-hermes-tauri-qualification.mjs';
+          import {assertWebCompatibilityComplete} from './tooling/scripts/test-hermes-web-compatibility.mjs';
           const base=process.env.RUNNER_TEMP,v=process.env.VARIANT,output=path.join(base,'hermes-summary-'+v);assert.ok(!fs.existsSync(output));fs.mkdirSync(output);
           const read=f=>JSON.parse(fs.readFileSync(f,'utf8')),hash=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
           const compatibilityRequired=v==='old'&&process.env.TARGET==='both';
           const report={status:'failed',candidateSha:process.env.CANDIDATE_SHA,expectedVersion:process.env.EXPECTED_VERSION,nativeMissing:true,nativeCompatibility:{required:compatibilityRequired,status:compatibilityRequired?'missing':'not-run',scope:'new app / existing 0.21.5 native only; Windows Web compatibility not covered',reason:compatibilityRequired?'both old job requires original compatibility evidence':'only both old job runs compatibility; not a compatibility pass'}};
+          report.webCompatibility={required:compatibilityRequired,status:compatibilityRequired?'missing':'not-run',scope:'new app / existing0.21.5 actual Chromium; separate from native'};
           try{
             assert.ok(['baseline','candidate','both'].includes(process.env.TARGET));assert.ok(['old','new'].includes(v));
             const web=read(path.join(base,'hermes-qualification-'+v,'report.json')),native=read(path.join(base,'hermes-native-'+v,'report.json')),build=read(path.join(base,'hermes-native-build-'+v,'build-receipt.json'));report.nativeMissing=false;
@@ -282,6 +294,11 @@ jobs:
               const app=path.join(compatRoot,'src-tauri/target/release/clawpanel.exe');assert.equal(path.resolve(compatBuild.application.path),app);assert.equal(path.resolve(compat.application.path),app);
               assert.equal(hash(app),compatBuild.application.sha256);assert.equal(compat.application.sha256,compatBuild.application.sha256);
               assert.equal(compatBuild.seedWebReportSha256,hash(path.join(base,'hermes-qualification-old','report.json')));assert.equal(compatBuild.seedNativeReportSha256,hash(path.join(base,'hermes-native-old','report.json')));assert.equal(compat.webQualification.sha256,compatBuild.seedWebReportSha256);
+              const webRoot=path.join(base,'hermes-web-old-runtime-compatibility'),webFile=path.join(webRoot,'report.json'),webCompat=read(webFile);assertWebCompatibilityComplete(webCompat);
+              assert.equal(webCompat.candidateSha,sha);assert.equal(webCompat.seedSha,process.env.CANDIDATE_SHA);assert.equal(webCompat.runtimeVersion,'0.21.5');
+              assert.equal(webCompat.applicationSha256,compatBuild.application.sha256);assert.equal(webCompat.sourceManifestSha256,compatBuild.sourceManifestSha256);assert.equal(webCompat.seedWebReportSha256,compatBuild.seedWebReportSha256);assert.equal(webCompat.seedNativeReportSha256,compatBuild.seedNativeReportSha256);assert.equal(webCompat.buildReportSha256,hash(buildFile));
+              const webBefore=read(path.join(webRoot,'host-before.json')),webAfter=read(path.join(webRoot,'host-after.json'));assertHostUnchanged(webBefore,webAfter);const {parentEnvSha256:webCompatEnv,...webMachine}=webAfter;assertHostUnchanged(machineBefore,webMachine);
+              report.webCompatibility={required:true,status:webCompat.status,scope:report.webCompatibility.scope,candidateSha:sha,seedSha:process.env.CANDIDATE_SHA,evidence:{reportSha256:hash(webFile)}};
               for(const dir of [buildRoot,nativeRoot]){const before=read(path.join(dir,'host-before.json')),after=read(path.join(dir,'host-after.json'));assertHostUnchanged(before,after);const {parentEnvSha256,...machine}=after;assertHostUnchanged(machineBefore,machine)}
               report.nativeCompatibility={required:true,status:compat.status,scope:report.nativeCompatibility.scope,candidateSha:sha,seedSha:process.env.CANDIDATE_SHA,application:compatBuild.application,evidence:{buildSha256:hash(buildFile),nativeSha256:hash(nativeFile),sourceManifestSha256:hash(manifestFile),buildToolingSha256:hash('tooling/scripts/test-hermes-compat-build.mjs')}};
             }
@@ -300,7 +317,7 @@ jobs:
           import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {publishEvidence} from './tooling/scripts/test-hermes-windows-qualification.mjs';
           const base=process.env.RUNNER_TEMP,v=process.env.VARIANT,roots={};
           for(const [label,prefix]of Object.entries({web:'hermes-qualification-',native:'hermes-native-',build:'hermes-native-build-',summary:'hermes-summary-'})){const p=path.join(base,prefix+v);if(fs.existsSync(p))roots[label]=p}
-          if(v==='old')for(const [label,name]of Object.entries({'compat-build':'hermes-native-build-old-runtime-compatibility','compat-native':'hermes-native-old-runtime-compatibility'})){const p=path.join(base,name);if(fs.existsSync(p))roots[label]=p}
+          if(v==='old')for(const [label,name]of Object.entries({'compat-build':'hermes-native-build-old-runtime-compatibility','compat-native':'hermes-native-old-runtime-compatibility','compat-web':'hermes-web-old-runtime-compatibility'})){const p=path.join(base,name);if(fs.existsSync(p))roots[label]=p}
           assert.ok(Object.keys(roots).length,'没有可保留的原始证据');await publishEvidence({roots,output:path.join(base,'hermes-public-'+v)});
           '@ | node --input-type=module
           exit $LASTEXITCODE
