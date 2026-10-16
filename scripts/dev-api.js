@@ -454,6 +454,17 @@ function runHermesVersionSilent() {
   return modern.ok ? modern : runHermesSilent('hermes', ['version'])
 }
 
+function parseHermesDashboardStatus(output) {
+  const lower = String(output || '').trim().toLowerCase()
+  // 官方信息命令在无进程时仍 exit 0，且文案自身也包含 running。
+  if (/^no (?:hermes )?(?:dashboard|serve)\b/m.test(lower) || /\bnot running\b|\bstopped\b|\binactive\b/.test(lower)) return false
+  const count = lower.match(/^(\d+) hermes dashboard\/serve process\(es\) running:/m)
+  if (count) return Number(count[1]) > 0
+  if (/^dashboard (?:is )?running(?:$|[ :])/m.test(lower) || /^listening on https?:\/\//m.test(lower)) return true
+  // URL、默认端口或帮助文字不是运行证明；未知输出由实际 TCP 探测兜底。
+  return null
+}
+
 function sanitizeHermesInstallOutput(text = '') {
   return String(text || '')
     .replaceAll(HERMES_GIT_URL, 'hermes-agent')
@@ -18841,20 +18852,12 @@ const handlers = {
   },
 
   _hermesDashboardCliStatus(port) {
-    const attempts = [
-      runHermesSilent('hermes', ['dashboard', '--status']),
-      runHermesSilent('hermes', ['dashboard', 'status']),
-    ]
-    for (const result of attempts) {
+    for (const args of [['dashboard', '--status'], ['dashboard', 'status']]) {
+      const result = runHermesSilent('hermes', args)
       if (!result.ok) continue
       const output = result.stdout || ''
-      const lower = output.toLowerCase()
-      if (lower.includes('not running') || lower.includes('stopped') || lower.includes('inactive') || lower.includes('no dashboard')) {
-        return { running: false, output }
-      }
-      if (lower.includes('running') || lower.includes('listening') || lower.includes('http://') || lower.includes('https://') || lower.includes(String(port))) {
-        return { running: true, output }
-      }
+      const running = parseHermesDashboardStatus(output)
+      return running === null ? null : { running, output }
     }
     return null
   },

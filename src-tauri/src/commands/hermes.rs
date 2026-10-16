@@ -1810,27 +1810,73 @@ fn hermes_dashboard_port() -> u16 {
     9119 // Hermes Dashboard 默认端口
 }
 
-fn hermes_dashboard_cli_status(port: u16) -> Option<(bool, String)> {
+#[cfg(test)]
+#[test]
+fn dashboard_status_probe_uses_actual_official_negative_output() {
+    for output in [
+        "No hermes dashboard or serve processes running.",
+        "No hermes dashboard processes running for this profile.",
+        "No dashboard processes running.",
+        "Dashboard is not running.",
+    ] {
+        assert_eq!(parse_hermes_dashboard_status(output), Some(false));
+    }
+    for output in [
+        "1 hermes dashboard/serve process(es) running:\nPID 123 [dashboard]",
+        "Dashboard running at http://127.0.0.1:9119",
+        "Listening on http://127.0.0.1:9119",
+    ] {
+        assert_eq!(parse_hermes_dashboard_status(output), Some(true));
+    }
+    for output in [
+        "Usage: manage running dashboards http://docs.example",
+        "http://127.0.0.1:9119",
+        "Default port: 9119",
+        "{\"running\":false}",
+    ] {
+        assert_eq!(parse_hermes_dashboard_status(output), None);
+    }
+}
+
+fn parse_hermes_dashboard_status(output: &str) -> Option<bool> {
+    let lower = output.trim().to_ascii_lowercase();
+    // 官方无进程信息也以 exit 0 返回，文案中的 running 不构成正向状态。
+    if lower.lines().any(|line| {
+        line.trim()
+            .strip_prefix("no ")
+            .map(|tail| tail.strip_prefix("hermes ").unwrap_or(tail))
+            .is_some_and(|tail| tail.starts_with("dashboard") || tail.starts_with("serve"))
+    }) || lower.contains("not running")
+        || lower.contains("stopped")
+        || lower.contains("inactive")
+    {
+        return Some(false);
+    }
+    for line in lower.lines().map(str::trim) {
+        if let Some((count, _)) = line.split_once(" hermes dashboard/serve process(es) running:") {
+            if let Ok(count) = count.parse::<u32>() {
+                return Some(count > 0);
+            }
+        }
+        if let Some(tail) = line.strip_prefix("dashboard ") {
+            let tail = tail.strip_prefix("is ").unwrap_or(tail);
+            if tail == "running" || tail.starts_with("running ") || tail.starts_with("running:") {
+                return Some(true);
+            }
+        }
+        if line.starts_with("listening on http://") || line.starts_with("listening on https://") {
+            return Some(true);
+        }
+    }
+    // 帮助文案、URL 或端口不作已运行证明，未知结果交给 TCP。
+    None
+}
+
+fn hermes_dashboard_cli_status(_port: u16) -> Option<(bool, String)> {
     let output = run_silent("hermes", &["dashboard", "--status"])
         .or_else(|_| run_silent("hermes", &["dashboard", "status"]))
         .ok()?;
-    let lower = output.to_ascii_lowercase();
-    if lower.contains("not running")
-        || lower.contains("stopped")
-        || lower.contains("inactive")
-        || lower.contains("no dashboard")
-    {
-        return Some((false, output));
-    }
-    if lower.contains("running")
-        || lower.contains("listening")
-        || lower.contains("http://")
-        || lower.contains("https://")
-        || lower.contains(&port.to_string())
-    {
-        return Some((true, output));
-    }
-    None
+    parse_hermes_dashboard_status(&output).map(|running| (running, output))
 }
 
 fn hermes_dashboard_tcp_running(port: u16, timeout_ms: u64) -> bool {
