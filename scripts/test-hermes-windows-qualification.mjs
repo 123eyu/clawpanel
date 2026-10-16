@@ -632,6 +632,33 @@ export function observeQualificationCommand(child, receipt) {
   return { timeout() { Object.assign(state, { timedOutAt: new Date().toISOString(), directExitCodeAtTimeout: child.exitCode, directSignalAtTimeout: child.signalCode, stdoutEndedAtTimeout: child.stdout?.readableEnded ?? null, stderrEndedAtTimeout: child.stderr?.readableEnded ?? null }) } }
 }
 
+let qualificationBrowserImportActive = false
+export async function loadQualificationChromium({ home, cacheDirectory, moduleFile, importer = url => import(url) }) {
+  assert.equal(qualificationBrowserImportActive, false, '拒绝并发 browser import 环境串扰')
+  assert.ok(path.isAbsolute(home) && path.isAbsolute(cacheDirectory) && path.isAbsolute(moduleFile), '私有 browser 路径必须绝对')
+  assert.equal(cacheDirectory, path.join(home, '.browsers'), '只接受私有 HOME 的固定 cache')
+  assert.equal(moduleFile, path.join(home, 'browser-tools/node_modules/playwright/index.mjs'), '只接受本轮私有 module')
+  for (const file of [home, cacheDirectory, moduleFile]) physical(file)
+  assert.ok(fs.statSync(cacheDirectory).isDirectory() && fs.statSync(moduleFile).isFile(), '私有 browser cache/module 缺失')
+  const name = 'PLAYWRIGHT_BROWSERS_PATH'
+  const keys = process.platform === 'win32' ? Object.keys(process.env).filter(k => k.toUpperCase() === name) : Object.keys(process.env).filter(k => k === name)
+  assert.ok(keys.length <= 1, 'browser cache 环境字段重复')
+  const key = keys[0] || name, present = keys.length === 1, value = process.env[key]
+  qualificationBrowserImportActive = true
+  let chromium
+  try {
+    // 仅当前一次性验收进程的模块初始化作用域；不写用户/系统环境、注册表或宿主cache。
+    // 官方registry在import时固定路径；finally先还原，再用显式私有env启动真实browser。
+    process.env[key] = cacheDirectory
+    ;({ chromium } = await importer(pathToFileURL(moduleFile).href))
+  } finally {
+    try { if (present) process.env[key] = value; else delete process.env[key] } finally { qualificationBrowserImportActive = false }
+  }
+  const executable = chromium?.executablePath?.()
+  assert.ok(typeof executable === 'string' && path.isAbsolute(executable) && within(cacheDirectory, executable), 'browser registry不在私有cache；拒绝旧module或宿主路径')
+  return chromium
+}
+
 async function execute(o) {
   if (o['--startup-stack-samples']) assert.ok(o['--version'] === '0.22.2' && o['--variant'] === 'new', 'stack samples require new candidate')
   for (const k of ['--root', '--sha', '--version', '--variant', '--output']) assert.ok(o[k], `缺少 ${k}`)
@@ -860,8 +887,13 @@ async function execute(o) {
       write('browser-tooling.json', r.browserTooling); save()
       // 本验收只用默认headless shell；不再下载未使用的headed Chrome，原600秒和真实启动/长UI门禁不变。
       await run(process.execPath, [path.join(home, 'browser-tools/node_modules/playwright/cli.js'), 'install', '--only-shell', 'chromium'], { timeout: 600000, browserDiagnostics: true })
-      const { chromium } = await import(pathToFileURL(path.join(home, 'browser-tools/node_modules/playwright/index.mjs')))
-      browser = await chromium.launch({ headless: true }); context = await browser.newContext({ locale: 'zh-CN' }); await context.tracing.start({ screenshots: true, snapshots: true, sources: true })
+      const parentEnvironmentBeforeImport = digest(JSON.stringify(process.env))
+      const chromium = await loadQualificationChromium({ home, cacheDirectory: env.PLAYWRIGHT_BROWSERS_PATH, moduleFile: path.join(browserModules, 'playwright/index.mjs') })
+      r.browserTooling.parentEnvironmentRestored = digest(JSON.stringify(process.env)) === parentEnvironmentBeforeImport
+      r.browserTooling.defaultRegistryExecutablePath = chromium.executablePath()
+      assert.equal(r.browserTooling.parentEnvironmentRestored, true, 'browser import后验收进程环境没有复原')
+      write('browser-tooling.json', r.browserTooling); save()
+      browser = await chromium.launch({ headless: true, env }); context = await browser.newContext({ locale: 'zh-CN' }); await context.tracing.start({ screenshots: true, snapshots: true, sources: true })
       const pageErrors = [], screenshots = [], prompts = []; context.on('page', p => p.on('pageerror', e => pageErrors.push(String(e))))
       const page = await context.newPage(); await page.goto(base + '/#/h/chat'); await page.locator('#hm-chat-input').waitFor()
       const dashPage = await context.newPage(); const dashResponse = await dashPage.goto(`http://127.0.0.1:${dashboardPort}`); assert.equal(dashResponse.status(), 200); await dashPage.locator('body').waitFor(); await dashPage.screenshot({ path: path.join(output, 'dashboard.png'), fullPage: true }); screenshots.push('dashboard.png'); await dashPage.close()
