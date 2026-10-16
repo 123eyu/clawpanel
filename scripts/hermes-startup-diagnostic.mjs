@@ -16,6 +16,15 @@ export function prepareStartupDiagnosticSpawn(spec, config) {
       args[3] !== config.pmScript || !config.pmScript || args[6] !== config.pin ||
       config.pin !== 'd923a5eb487a17c0a68801bba9ef0f56c81040a8' || args[7] !== '--') throw Error('diagnostic PM contract mismatch')
   const prepared = [args[0], args[1], '-X', 'importtime', ...args.slice(2)]
+  if (config.stackSampling === true) {
+    // 不改固定源码或 PM 原脚本；原始脚本作为后缀完整执行。采样线程不阻止退出。
+    const prefix = String.raw`import faulthandler as _hfd, threading as _hth, os as _hos, sys as _hsys
+print('CLAWPANEL_STACK_SAMPLER_MAIN',_hos.getpid(),hex(_hth.get_ident()),file=_hsys.stderr,flush=True)
+_hfd.dump_traceback_later(2, repeat=True)
+_hst=_hth.Timer(60,_hfd.cancel_dump_traceback_later);_hst.daemon=True;_hst.start()
+`
+    prepared[5] = prefix + prepared[5]
+  }
   // Python subprocess.list2cmdline 的 Windows UTF16 长度（包含 NUL）；不裁剪 PM 脚本。
   function quote(value) {
     const quoted = !value || /[ \t]/.test(value)

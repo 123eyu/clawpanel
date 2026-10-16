@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import YAML from 'yaml'
+import { spawnSync } from 'node:child_process'
 import { parseArgs, qualificationStatus, spawnAuditSource, matrixFromInputs } from '../scripts/test-hermes-windows-qualification.mjs'
 
 const load = () => import('../scripts/hermes-startup-diagnostic.mjs')
@@ -78,4 +79,24 @@ test('只有完成真实 runner 准入才注入配置；pyc 在已核 completion
 
 test('宿主 canary 缺失或变化时诊断也必须失败', () => {
   for (const hostUnchanged of [undefined, false]) assert.equal(qualificationStatus({ diagnostic: { enabled: true }, hostUnchanged }), 'failed')
+})
+
+test('二级堆栈采样显式开启，仅新 PM 候选；原 args/script 不改写', async () => {
+  const { prepareStartupDiagnosticSpawn } = await load(), s = spec(), result = prepareStartupDiagnosticSpawn(s, { ...config, stackSampling: true })
+  assert.match(result.args[5], /dump_traceback_later\(2, repeat=True\)/)
+  assert.ok(result.args[5].endsWith(s.args[3])); assert.equal(s.args[3], config.pmScript)
+  assert.match(result.args[5], /daemon=True/); assert.match(result.args[5], /Timer\(60,/)
+  assert.throws(() => matrixFromInputs({ TARGET: 'baseline', BASELINE_SHA: 'a'.repeat(40), PLATFORM: 'windows', STARTUP_DIAGNOSTIC: 'true', STARTUP_STACK_SAMPLES: 'true' }), /candidate/)
+  assert.equal(parseArgs(['--execute', '--startup-diagnostic', '--startup-stack-samples'])['--startup-stack-samples'], true)
+  assert.throws(() => parseArgs(['--execute', '--startup-stack-samples']), /diagnostic/)
+})
+
+test('实际 Python 栈采样不等待60秒、不替换 exit7，提供主线程 PID 映射', { timeout: 10000 }, async () => {
+  const { prepareStartupDiagnosticSpawn } = await load(), s = spec(), script = "import time; time.sleep(2.3); raise SystemExit(7)"
+  s.args[3] = script; s.program = process.env.PYTHON || 'python'
+  const result = prepareStartupDiagnosticSpawn(s, { ...config, pmScript: script, stackSampling: true })
+  const started = performance.now(), child = spawnSync(result.program, result.args, { windowsHide: true, encoding: 'utf8', timeout: 7000, maxBuffer: 1048576 })
+  assert.equal(child.status, 7, child.stderr.slice(-1500)); assert.ok(performance.now() - started < 6000)
+  assert.match(child.stderr, /CLAWPANEL_STACK_SAMPLER_MAIN \d+ 0x[0-9a-f]+/)
+  assert.match(child.stderr, /Timeout \(0:00:02\)/); assert.match(child.stderr, /<string>/)
 })

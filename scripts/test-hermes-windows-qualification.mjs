@@ -24,7 +24,7 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const alive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
 
 export function parseArgs(args) {
-  const flags = new Set(['--plan', '--execute', '--help', '--matrix', '--startup-diagnostic'])
+  const flags = new Set(['--plan', '--execute', '--help', '--matrix', '--startup-diagnostic', '--startup-stack-samples'])
   const values = new Set(['--root', '--sha', '--version', '--variant', '--output', '--verify-linux-evidence', '--publish-evidence'])
   const o = {}
   for (let i = 0; i < args.length; i++) {
@@ -37,11 +37,13 @@ export function parseArgs(args) {
   if (o['--version']) assert.match(o['--version'], /^0\.\d+\.\d+$/, '必须精确版本')
   if (o['--variant']) assert.ok(['old', 'new'].includes(o['--variant']), 'variant 必须 old/new')
   assert.ok([o['--plan'], o['--execute'], o['--matrix'], o['--verify-linux-evidence'], o['--publish-evidence']].filter(Boolean).length <= 1, '模式互斥')
+  if (o['--startup-stack-samples']) assert.equal(o['--startup-diagnostic'], true, 'stack sampling requires startup diagnostic')
   if (o['--startup-diagnostic']) assert.equal(o['--execute'], true, 'startup diagnostic requires execute')
   return o
 }
 
 export function matrixFromInputs(env) {
+  if (env.STARTUP_STACK_SAMPLES === 'true') assert.ok(env.STARTUP_DIAGNOSTIC === 'true' && env.TARGET === 'candidate' && env.PLATFORM === 'windows', 'stack samples require Windows candidate diagnostic')
   if (env.STARTUP_DIAGNOSTIC === 'true') assert.notEqual(env.PLATFORM, 'linux', 'startup diagnostic requires Windows')
   assert.ok(['baseline', 'candidate', 'both'].includes(env.TARGET), 'target 无效')
   const include = []
@@ -443,11 +445,12 @@ export function verifyLinuxEvidence(output, sha, version) {
 }
 
 async function execute(o) {
+  if (o['--startup-stack-samples']) assert.ok(o['--version'] === '0.22.2' && o['--variant'] === 'new', 'stack samples require new candidate')
   for (const k of ['--root', '--sha', '--version', '--variant', '--output']) assert.ok(o[k], `缺少 ${k}`)
   const output = path.resolve(o['--output']); physical(output); assert.ok(!fs.existsSync(output), '输出必须全新'); fs.mkdirSync(output, { recursive: true })
   const r = { schemaVersion: 1, status: 'failed', candidateSha: o['--sha'], expectedVersion: o['--version'], variant: o['--variant'], startedAt: new Date().toISOString(), commands: [], installerStarted: false, stages: STAGES.map(name => ({ name, status: 'missing' })), nativeTauri: { status: 'not-run', qualificationComplete: false }, limitations: ['仅手工一次性托管 Windows 的真实 Web 验收，不证明 native Tauri GUI', 'HOME 隔离不是 Windows HKCU 沙箱；因此本机/self-hosted 均在候选执行前拒绝', '不自动恢复宿主变更，不自动重试，不使用业务凭据或收费模型'] }
   const diagnostic = o['--startup-diagnostic'] === true
-  if (diagnostic) r.diagnostic = { enabled: true, scope: 'diagnostic-only-not-acceptance', qualificationPass: false, originalStartupBudgetMs: 20000, cliBudgetMs: 15000, installBudgetMs: 900000 }
+  if (diagnostic) r.diagnostic = { enabled: true, scope: 'diagnostic-only-not-acceptance', stackSampling: o['--startup-stack-samples'] === true, qualificationPass: false, originalStartupBudgetMs: 20000, cliBudgetMs: 15000, installBudgetMs: 900000 }
   const save = () => fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(r, null, 2))
   const write = (name, value) => fs.writeFileSync(path.join(output, name), JSON.stringify(value, null, 2))
   let env, home, project, checkout, before, proof, web, provider, base, runtimePort, dashboardPort, browser, context, cli, python, release, lastSession, stopped = true, installCursor = 0
@@ -595,7 +598,7 @@ async function execute(o) {
     base = `http://127.0.0.1:${webPort}`; await until(() => reachable(webPort), 30000)
     await stage('install-privatecompletion', async () => { r.installerStarted = true; markInstall(); save(); await api('install_hermes', { method: 'uv-tool' }, 900000); const receipt = await completion()
       if (diagnostic) {
-        const config = { enabled: true, scope: r.diagnostic.scope, version: o['--version'], gatewayLog: path.join(env.HERMES_HOME, 'gateway-run.log'), phaseOutput: path.join(output, 'startup-file-phases.jsonl') }
+        const config = { enabled: true, stackSampling: r.diagnostic.stackSampling, scope: r.diagnostic.scope, version: o['--version'], gatewayLog: path.join(env.HERMES_HOME, 'gateway-run.log'), phaseOutput: path.join(output, 'startup-file-phases.jsonl') }
         if (o['--version'] === '0.22.2') {
           config.pmScript = fs.readFileSync(path.join(project, 'scripts/hermes-pm-runtime.js'), 'utf8').match(/export const HERMES_PRIVATE_LAUNCH_SCRIPT = String.raw`([\s\S]*?)\n`/)?.[1]
           assert.ok(config.pmScript?.includes(release.commit), '缺固定 PM launch script'); config.pmScript += '\n'; config.pin = release.commit

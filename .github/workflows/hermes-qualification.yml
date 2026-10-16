@@ -19,6 +19,10 @@ on:
         description: '仅 Windows 冷启动观测，不构成资格通过；保留原20秒判定'
         type: boolean
         default: false
+      startup_stack_samples:
+        description: '二级采样：仅 candidate/Windows/diagnostic，原20秒判定不变'
+        type: boolean
+        default: false
       baseline_sha:
         description: '旧版0.21.5导出的完整40位SHA；不改安装pin'
         type: string
@@ -58,6 +62,7 @@ jobs:
           TARGET: ${{ inputs.target }}
           PLATFORM: ${{ inputs.platform }}
           STARTUP_DIAGNOSTIC: ${{ inputs.startup_diagnostic }}
+          STARTUP_STACK_SAMPLES: ${{ inputs.startup_stack_samples }}
           BASELINE_SHA: ${{ inputs.baseline_sha }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
@@ -95,11 +100,12 @@ jobs:
         shell: pwsh
         env:
           STARTUP_DIAGNOSTIC: ${{ inputs.startup_diagnostic }}
+          STARTUP_STACK_SAMPLES: ${{ inputs.startup_stack_samples }}
           CANDIDATE_SHA: ${{ matrix.sha }}
           EXPECTED_VERSION: ${{ matrix.version }}
           VARIANT: ${{ matrix.variant }}
         run: |
-          $diagnosticArgs = @(); if ($env:STARTUP_DIAGNOSTIC -eq 'true') { $diagnosticArgs = @('--startup-diagnostic') }
+          $diagnosticArgs = @(); if ($env:STARTUP_DIAGNOSTIC -eq 'true') { $diagnosticArgs = @('--startup-diagnostic') }; if ($env:STARTUP_STACK_SAMPLES -eq 'true') { $diagnosticArgs += '--startup-stack-samples' }
           node tooling/scripts/test-hermes-windows-qualification.mjs @diagnosticArgs --execute --root candidate --sha "$env:CANDIDATE_SHA" --version "$env:EXPECTED_VERSION" --variant "$env:VARIANT" --output "$env:RUNNER_TEMP/hermes-qualification-$env:VARIANT"
           exit $LASTEXITCODE
       - name: 原资格先验、同 Web HOME 的私有 Rust 工具链（不写宿主 PATH）
