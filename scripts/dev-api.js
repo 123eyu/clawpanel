@@ -8,7 +8,7 @@ import { sanitizeOpenCodeStorage } from './opencode-proxy.js'
 import path from 'path'
 import os from 'os'
 import { homedir, networkInterfaces } from 'os'
-import { execSync, spawn, spawnSync } from 'child_process'
+import { execSync, spawn, spawnSync, execFile } from 'child_process'
 import { fileURLToPath } from 'url'
 import net from 'net'
 import http from 'http'
@@ -432,26 +432,74 @@ function isLoopbackGatewayUrl(url) {
   }
 }
 
-function runHermesSilent(program, args) {
+const HERMES_CLI_CONCURRENCY = 2
+const HERMES_CLI_QUEUE_LIMIT = 8
+const HERMES_CLI_DEADLINE_MS = 15000
+let hermesCliActive = 0
+const hermesCliQueue = []
+
+function acquireHermesCliSlot(deadline) {
+  return new Promise((resolve, reject) => {
+    const entry = {
+      timer: null,
+      start() {
+        clearTimeout(entry.timer)
+        if (performance.now() >= deadline) { reject(new Error('Hermes CLI queue deadline exceeded (15000ms)')); return }
+        hermesCliActive++
+        let released = false
+        resolve(() => {
+          if (released) return
+          released = true
+          hermesCliActive--
+          while (hermesCliActive < HERMES_CLI_CONCURRENCY && hermesCliQueue.length) hermesCliQueue.shift().start()
+        })
+      },
+    }
+    if (hermesCliActive < HERMES_CLI_CONCURRENCY) entry.start()
+    else if (hermesCliQueue.length >= HERMES_CLI_QUEUE_LIMIT) reject(new Error('Hermes CLI queue full (2 running, 8 waiting)'))
+    else {
+      hermesCliQueue.push(entry)
+      entry.timer = setTimeout(() => {
+        const index = hermesCliQueue.indexOf(entry)
+        if (index !== -1) hermesCliQueue.splice(index, 1)
+        reject(new Error('Hermes CLI queue deadline exceeded (15000ms)'))
+      }, Math.max(1, Math.ceil(deadline - performance.now())))
+    }
+  })
+}
+
+async function runHermesSilent(program, args) {
+  // 整次调用共用原 15 秒预算；队满或过期的写命令不启动、不重放。
+  const deadline = performance.now() + HERMES_CLI_DEADLINE_MS
+  let release
   try {
-    const result = spawnSync(program, args, {
-      env: buildHermesRuntimeEnv(),
-      timeout: 15000,
-      windowsHide: true,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
+    release = await acquireHermesCliSlot(deadline)
+    const spec = { program, args }
+    const env = buildHermesRuntimeEnv()
+    // 只扣剩余预算（含环境准备）；health HTTP 不进入 CLI 队列。
+    const remaining = Math.ceil(deadline - performance.now())
+    if (remaining <= 0) return { ok: false, stderr: 'Hermes CLI deadline exceeded before launch (15000ms)' }
+    const result = await new Promise(resolve => {
+      const child = execFile(spec.program, spec.args, {
+        env, timeout: remaining, windowsHide: true,
+        encoding: 'utf8', maxBuffer: 1024 * 1024,
+      }, (error, stdout, stderr) => resolve({ error, stdout, stderr }))
+      // 保留旧 ignore stdin 的非交互 EOF 语义。
+      child.stdin?.end()
     })
-    if (result.status === 0) return { ok: true, stdout: (result.stdout || '').trim() }
-    return { ok: false, stderr: (result.stderr || '').trim() }
+    if (!result.error) return { ok: true, stdout: String(result.stdout || '').trim() }
+    return { ok: false, stderr: String(result.stderr || result.error.message || result.error).trim() }
   } catch (e) {
     return { ok: false, stderr: String(e) }
+  } finally {
+    release?.()
   }
 }
 
-function runHermesVersionSilent() {
+async function runHermesVersionSilent() {
   // 官方快速入口在完整 CLI 启动前返回；仅旧内核不支持时回退子命令。
-  const modern = runHermesSilent('hermes', ['--version'])
-  return modern.ok ? modern : runHermesSilent('hermes', ['version'])
+  const modern = await runHermesSilent('hermes', ['--version'])
+  return modern.ok ? modern : await runHermesSilent('hermes', ['version'])
 }
 
 function parseHermesDashboardStatus(output) {
@@ -482,6 +530,11 @@ export function buildHermesInstallEnv(config = {}, baseEnv = process.env) {
     ...buildHermesRuntimeEnv(baseEnv),
     GIT_TERMINAL_PROMPT: '0',
   }
+  if (isWindows) {
+    env.UV_NO_MODIFY_PATH = '1'
+    // PS7 的模块路径不能传给官方 Windows PowerShell 5.1 安装阶段。
+    for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key]
+  }
   const pypiMirror = String(config?.pypiMirror || '').trim()
   if (pypiMirror) {
     env.UV_DEFAULT_INDEX = pypiMirror
@@ -505,7 +558,7 @@ export function buildHermesInstallEnv(config = {}, baseEnv = process.env) {
   return env
 }
 
-function hermesInstallerPlan(home = hermesHome()) {
+export function hermesInstallerPlan(home = hermesHome()) {
   const installDir = hermesSourceDir(home)
   const cacheDir = path.join(home, '.clawpanel-cache')
   if (isWindows) {
@@ -518,8 +571,8 @@ function hermesInstallerPlan(home = hermesHome()) {
       // 0.21.5 的受管 Python 位于 checkout 内，repository 必须先于 python。
       // 不运行全局 PATH 写入、系统软件安装或交互配置阶段。
       stages: ['uv', 'git', 'node', 'repository', 'python', 'venv', 'dependencies', 'node-deps', 'config-templates', 'platform-sdks', 'bootstrap-marker'],
-      argsForStage: (scriptPath, stage) => [
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath,
+      argsForStage: (scriptPath, stage, wrapperPath) => [
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', wrapperPath, '-InstallerPath', scriptPath,
         '-HermesHome', home, '-InstallDir', installDir,
         '-Branch', HERMES_STABLE_TAG,
         '-Commit', HERMES_STABLE_COMMIT, '-ForceCommit',
@@ -546,6 +599,14 @@ function hermesInstallerPlan(home = hermesHome()) {
 
 function hermesInstallerChecksum(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex')
+}
+
+export function ensureHermesManagedWrapper(plan) {
+  // 与 Rust include_str 共用原始字节；vendor 缓存及其固定 hash 不变。
+  const bytes = fs.readFileSync(new URL('./hermes-managed-install.ps1', import.meta.url))
+  const wrapperPath = path.join(path.dirname(plan.scriptPath), `clawpanel-managed-${hermesInstallerChecksum(bytes)}.ps1`)
+  if (!fs.existsSync(wrapperPath) || !fs.readFileSync(wrapperPath).equals(bytes)) fs.writeFileSync(wrapperPath, bytes)
+  return wrapperPath
 }
 
 async function readHermesInstallerViaGit(plan, env) {
@@ -626,10 +687,11 @@ export async function installHermesManagedSource(config = readPanelConfig()) {
   const plan = hermesInstallerPlan()
   const env = buildHermesInstallEnv(config)
   const scriptPath = await ensureHermesInstallerScript(plan, env)
+  const wrapperPath = isWindows ? ensureHermesManagedWrapper(plan) : null
   const checkoutWasClean = await normalizeHermesLineEndingOnlyChanges(hermesSourceDir(), env)
 
   for (const stage of plan.stages) {
-    const result = await runHermesInstallCommand(plan.program, plan.argsForStage(scriptPath, stage), {
+    const result = await runHermesInstallCommand(plan.program, plan.argsForStage(scriptPath, stage, wrapperPath), {
       env,
       timeout: 20 * 60 * 1000,
       windowsHide: true,
@@ -16973,7 +17035,7 @@ const handlers = {
   // Hermes Agent 命令
   // =========================================================================
 
-  check_python() {
+  async check_python() {
     const enhanced = hermesEnhancedPath()
     const result = { platform: isWindows ? 'win-x64' : isMac ? 'mac-arm64' : 'linux-x64' }
     const candidates = isWindows
@@ -16981,7 +17043,7 @@ const handlers = {
       : [['python3', ['--version']], ['python', ['--version']]]
     let found = false
     for (const [cmd, args] of candidates) {
-      const r = runHermesSilent(cmd, args)
+      const r = await runHermesSilent(cmd, args)
       if (r.ok) {
         const m = r.stdout.match(/(\d+)\.(\d+)\.(\d+)/)
         if (m) {
@@ -16999,12 +17061,12 @@ const handlers = {
     if (!found) {
       result.installed = false; result.version = null; result.versionOk = false; result.path = null; result.pythonCmd = null
     }
-    result.hasPip = runHermesSilent('pip', ['--version']).ok || runHermesSilent('pip3', ['--version']).ok
-    result.hasPipx = runHermesSilent('pipx', ['--version']).ok
+    result.hasPip = (await runHermesSilent('pip', ['--version'])).ok || (await runHermesSilent('pip3', ['--version'])).ok
+    result.hasPipx = (await runHermesSilent('pipx', ['--version'])).ok
     const uvPath = path.join(uvBinDir(), isWindows ? 'uv.exe' : 'uv')
-    result.hasUv = fs.existsSync(uvPath) || runHermesSilent('uv', ['--version']).ok
-    result.hasGit = runHermesSilent('git', ['--version']).ok
-    result.hasBrew = !isWindows && runHermesSilent('brew', ['--version']).ok
+    result.hasUv = fs.existsSync(uvPath) || (await runHermesSilent('uv', ['--version'])).ok
+    result.hasGit = (await runHermesSilent('git', ['--version'])).ok
+    result.hasBrew = !isWindows && (await runHermesSilent('brew', ['--version'])).ok
     return result
   },
 
@@ -17012,7 +17074,7 @@ const handlers = {
     const home = hermesHome()
     const result = {}
     // 1. 检测 hermes CLI
-    const r = runHermesVersionSilent()
+    const r = await runHermesVersionSilent()
     if (r.ok) {
       const verMatch = r.stdout.split(/\s+/).find(s => /^v?\d/.test(s)) || r.stdout
       result.installed = true
@@ -17081,7 +17143,7 @@ const handlers = {
     // 0.20.5 禁止从 Git 构建 wheel/sdist；extras 由上游锁定依赖统一管理。
     void extras
     await installHermesManagedSource(readPanelConfig())
-    const ver = runHermesVersionSilent()
+    const ver = await runHermesVersionSilent()
     if (ver.ok) return ver.stdout
     throw new Error('安装完成但验证失败: hermes version 不可用')
     } finally {
@@ -17199,13 +17261,13 @@ const handlers = {
     }
     if (action === 'stop') {
       if (_hermesGwProcess) { try { _hermesGwProcess.kill() } catch {} _hermesGwProcess = null }
-      const r = runHermesSilent('hermes', ['gateway', 'stop'])
+      const r = await runHermesSilent('hermes', ['gateway', 'stop'])
       // 原生 CLI 负责当前宿主的身份核验，不按进程名终止其他 Profile/安装目录。
       if (!r.ok) throw new Error(`Gateway 停止失败: ${r.stderr || '请检查 Gateway 运行状态'}`)
       return 'Gateway 已停止'
     }
     if (action === 'status') {
-      const r = runHermesSilent('hermes', ['gateway', 'status'])
+      const r = await runHermesSilent('hermes', ['gateway', 'status'])
       return r.ok ? r.stdout : 'unknown'
     }
     throw new Error(`不支持的操作: ${action}`)
@@ -18823,7 +18885,7 @@ const handlers = {
 
   async hermes_dashboard_probe() {
     const port = handlers._hermesDashboardPort()
-    const cli = handlers._hermesDashboardCliStatus(port)
+    const cli = await handlers._hermesDashboardCliStatus(port)
     // 官方 CLI 会列出其他 HOME/端口，不能覆盖本实例配置端口的实际结果。
     const running = await _tcpProbe('127.0.0.1', port, 800)
     return { running, port, status: cli?.output || null }
@@ -18852,9 +18914,9 @@ const handlers = {
     return port
   },
 
-  _hermesDashboardCliStatus(port) {
+  async _hermesDashboardCliStatus(port) {
     for (const args of [['dashboard', '--status'], ['dashboard', 'status']]) {
-      const result = runHermesSilent('hermes', args)
+      const result = await runHermesSilent('hermes', args)
       if (!result.ok) continue
       const output = result.stdout || ''
       const running = parseHermesDashboardStatus(output)
@@ -18863,15 +18925,15 @@ const handlers = {
     return null
   },
 
-  _hermesDashboardCliStop() {
-    return runHermesSilent('hermes', ['dashboard', '--stop']).ok
-      || runHermesSilent('hermes', ['dashboard', 'stop']).ok
+  async _hermesDashboardCliStop() {
+    return (await runHermesSilent('hermes', ['dashboard', '--stop'])).ok
+      || (await runHermesSilent('hermes', ['dashboard', 'stop'])).ok
   },
 
   async hermes_dashboard_start() {
     const port = handlers._hermesDashboardPort()
     // 1. 已运行？
-    const cli = handlers._hermesDashboardCliStatus(port)
+    const cli = await handlers._hermesDashboardCliStatus(port)
     if (cli?.running || await _tcpProbe('127.0.0.1', port, 500)) {
       return { started: true, already_running: true, port }
     }
@@ -18949,7 +19011,7 @@ const handlers = {
 
   async hermes_dashboard_stop() {
     const port = handlers._hermesDashboardPort()
-    const cliStopped = handlers._hermesDashboardCliStop()
+    const cliStopped = await handlers._hermesDashboardCliStop()
     if (!handlers._dashPid) {
       if (cliStopped) {
         for (let i = 0; i < 20; i++) {
@@ -18978,8 +19040,8 @@ const handlers = {
     }
   },
 
-  hermes_toolsets_list() {
-    const r = runHermesSilent('hermes', ['tools', 'list', '--platform', 'cli'])
+  async hermes_toolsets_list() {
+    const r = await runHermesSilent('hermes', ['tools', 'list', '--platform', 'cli'])
     return { raw: r.ok ? r.stdout : '' }
   },
 
@@ -19089,7 +19151,7 @@ const handlers = {
   async hermes_detect_environments() {
     const result = { wsl2: { available: false }, docker: { available: false } }
     // Docker
-    const dockerR = runHermesSilent('docker', ['info', '--format', '{{.ServerVersion}}'])
+    const dockerR = await runHermesSilent('docker', ['info', '--format', '{{.ServerVersion}}'])
     if (dockerR.ok) {
       result.docker.available = true
       result.docker.version = dockerR.stdout
@@ -19114,12 +19176,12 @@ const handlers = {
   // Hermes Sessions / Logs / Skills / Memory
   // =========================================================================
 
-  hermes_sessions_list({ source, limit, profile } = {}) {
+  async hermes_sessions_list({ source, limit, profile } = {}) {
     const args = []
     if (profile) args.push('--profile', profile)
     args.push('sessions', 'export', '-')
     if (source) args.push('--source', source)
-    const r = runHermesSilent('hermes', args)
+    const r = await runHermesSilent('hermes', args)
     if (!r.ok) return []
     const sessions = []
     for (const line of r.stdout.split('\n')) {
@@ -19159,13 +19221,13 @@ const handlers = {
     return sessions
   },
 
-  hermes_sessions_summary_list({ source, limit, profile } = {}) {
+  async hermes_sessions_summary_list({ source, limit, profile } = {}) {
     const lim = Math.max(1, Math.min(Number(limit || 80), 500))
     const args = []
     if (profile) args.push('--profile', profile)
     args.push('sessions', 'list', '--limit', String(lim))
     if (source) args.push('--source', source)
-    const r = runHermesSilent('hermes', args)
+    const r = await runHermesSilent('hermes', args)
     if (!r.ok) return []
     const sessions = []
     let hasTitles = false
@@ -19274,12 +19336,12 @@ const handlers = {
     }
   },
 
-  hermes_session_detail({ sessionId, profile } = {}) {
+  async hermes_session_detail({ sessionId, profile } = {}) {
     if (!sessionId) throw new Error('sessionId is required')
     const args = []
     if (profile) args.push('--profile', profile)
     args.push('sessions', 'export', '-', '--session-id', sessionId)
-    const r = runHermesSilent('hermes', args)
+    const r = await runHermesSilent('hermes', args)
     if (!r.ok) throw new Error('Failed to read sessions')
     for (const line of r.stdout.split('\n')) {
       const t = line.trim()
@@ -19305,41 +19367,41 @@ const handlers = {
     throw new Error('Session not found')
   },
 
-  hermes_session_delete({ sessionId, profile } = {}) {
+  async hermes_session_delete({ sessionId, profile } = {}) {
     if (!sessionId) throw new Error('sessionId is required')
     const args = []
     if (profile) args.push('--profile', profile)
     args.push('sessions', 'delete', sessionId, '--yes')
-    const r = runHermesSilent('hermes', args)
+    const r = await runHermesSilent('hermes', args)
     if (!r.ok) throw new Error(`Failed to delete session: ${r.stderr || 'unknown error'}`)
     return 'ok'
   },
 
-  hermes_session_rename({ sessionId, title, profile } = {}) {
+  async hermes_session_rename({ sessionId, title, profile } = {}) {
     if (!sessionId || !title) throw new Error('sessionId and title are required')
     const args = []
     if (profile) args.push('--profile', profile)
     args.push('sessions', 'rename', sessionId, title)
-    const r = runHermesSilent('hermes', args)
+    const r = await runHermesSilent('hermes', args)
     if (!r.ok) throw new Error(`Failed to rename session: ${r.stderr || 'unknown error'}`)
     return 'ok'
   },
 
-  hermes_profiles_list() {
-    const r = runHermesSilent('hermes', ['profile', 'list'])
+  async hermes_profiles_list() {
+    const r = await runHermesSilent('hermes', ['profile', 'list'])
     if (!r.ok) return { active: 'default', profiles: [] }
     return parseHermesProfileListOutput(r.stdout)
   },
 
-  hermes_profile_use({ name } = {}) {
+  async hermes_profile_use({ name } = {}) {
     if (!name) throw new Error('name is required')
-    const r = runHermesSilent('hermes', ['profile', 'use', name])
+    const r = await runHermesSilent('hermes', ['profile', 'use', name])
     if (!r.ok) throw new Error(`Failed to switch profile: ${r.stderr || 'unknown error'}`)
     return 'ok'
   },
 
-  hermes_logs_list() {
-    const r = runHermesSilent('hermes', ['logs', 'list'])
+  async hermes_logs_list() {
+    const r = await runHermesSilent('hermes', ['logs', 'list'])
     if (!r.ok) {
       // Fallback: read log files from ~/.hermes/logs/
       const logsDir = path.join(hermesHome(), 'logs')
@@ -19365,11 +19427,11 @@ const handlers = {
     return files
   },
 
-  hermes_logs_read({ name, lines = 200, level } = {}) {
+  async hermes_logs_read({ name, lines = 200, level } = {}) {
     if (!name) throw new Error('log file name is required')
     const args = ['logs', name, '-n', String(lines)]
     if (level) args.push('--level', level)
-    const r = runHermesSilent('hermes', args)
+    const r = await runHermesSilent('hermes', args)
     if (!r.ok) {
       // Fallback: direct file read
       const logPath = path.join(hermesHome(), 'logs', name)
@@ -19634,7 +19696,7 @@ const handlers = {
     _hermesInstallRunning = true
     try {
       await installHermesManagedSource(readPanelConfig())
-      const ver = runHermesVersionSilent()
+      const ver = await runHermesVersionSilent()
       if (!ver.ok) throw new Error('升级完成但验证失败: hermes version 不可用')
       return `升级完成，当前稳定版: Hermes Agent ${HERMES_STABLE_VERSION} (${HERMES_STABLE_TAG})`
     } finally {

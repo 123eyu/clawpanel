@@ -2841,8 +2841,25 @@ async fn ensure_hermes_installer_script(app: &tauri::AppHandle) -> Result<PathBu
     Ok(script_path)
 }
 
+#[cfg(target_os = "windows")]
+fn ensure_hermes_managed_wrapper() -> Result<PathBuf, String> {
+    // 与 Web 读取的固定文件同源，原版安装器仍独立保持固定 hash。
+    let bytes = include_str!("../../../scripts/hermes-managed-install.ps1").as_bytes();
+    let cache = hermes_home().join(".clawpanel-cache");
+    std::fs::create_dir_all(&cache).map_err(|e| format!("创建受管安装器目录失败: {e}"))?;
+    let wrapper = cache.join(format!(
+        "clawpanel-managed-{}.ps1",
+        hermes_installer_sha256(bytes)
+    ));
+    if std::fs::read(&wrapper).ok().as_deref() != Some(bytes) {
+        std::fs::write(&wrapper, bytes).map_err(|e| format!("写入受管安装器失败: {e}"))?;
+    }
+    Ok(wrapper)
+}
+
 fn build_hermes_installer_stage_command(
     script_path: &Path,
+    wrapper_path: &Path,
     stage: &str,
 ) -> tokio::process::Command {
     let home = hermes_home();
@@ -2853,6 +2870,8 @@ fn build_hermes_installer_stage_command(
         let mut command = tokio::process::Command::new("powershell.exe");
         command
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(wrapper_path)
+            .arg("-InstallerPath")
             .arg(script_path)
             .arg("-HermesHome")
             .arg(&home)
@@ -2874,6 +2893,7 @@ fn build_hermes_installer_stage_command(
 
     #[cfg(not(target_os = "windows"))]
     let mut cmd = {
+        let _ = wrapper_path;
         let mut command = tokio::process::Command::new("bash");
         command
             .arg(script_path)
@@ -2906,7 +2926,15 @@ fn build_hermes_installer_stage_command(
     apply_git_mirror_env(&mut cmd);
     super::apply_proxy_env_tokio(&mut cmd);
     #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    {
+        cmd.env("UV_NO_MODIFY_PATH", "1");
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().eq_ignore_ascii_case("PSModulePath") {
+                cmd.env_remove(name);
+            }
+        }
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     cmd
 }
 
@@ -2915,6 +2943,10 @@ async fn install_hermes_managed_source(app: &tauri::AppHandle) -> Result<(), Str
     ensure_portable_git(app).await?;
     emit_hermes_stable_version_log(app);
     let script_path = ensure_hermes_installer_script(app).await?;
+    #[cfg(target_os = "windows")]
+    let wrapper_path = ensure_hermes_managed_wrapper()?;
+    #[cfg(not(target_os = "windows"))]
+    let wrapper_path = script_path.clone();
     let checkout_was_clean = normalize_hermes_line_ending_only_changes();
     let stage_count = HERMES_INSTALLER_STAGES.len().max(1);
 
@@ -2927,7 +2959,7 @@ async fn install_hermes_managed_source(app: &tauri::AppHandle) -> Result<(), Str
         );
         let (status, output_tail) = run_install_command_streaming(
             app,
-            build_hermes_installer_stage_command(&script_path, stage),
+            build_hermes_installer_stage_command(&script_path, &wrapper_path, stage),
         )
         .await?;
         if status.success() {

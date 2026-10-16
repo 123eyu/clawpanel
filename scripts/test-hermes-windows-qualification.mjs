@@ -245,6 +245,9 @@ export async function observeFailedGatewayStartup({ isOpen, readHealth, now = Da
 function ps(code) {
   // Windows PowerShell 5.1 自行建立模块路径，不继承 PS7 的不兼容模块；仅改子环境副本。
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'))
+  // PS5 默认代码页会把弯引号最佳匹配为未转义 ASCII 引号，破坏 CIM JSON。
+  // 在 JSON 序列化前固定 stdout 编码；不丢字段、不截断命令或放宽原门禁。
+  code = '[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)\n' + code
   const started = Date.now()
   const r = spawnSync('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { env, encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })
   const phaseTimings = []
