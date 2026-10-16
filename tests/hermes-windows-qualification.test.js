@@ -10,6 +10,14 @@ import YAML from 'yaml'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const script = path.join(root, 'scripts/test-hermes-windows-qualification.mjs')
 const load = () => import('../scripts/test-hermes-windows-qualification.mjs')
+
+test('新旧 Windows 各自一次性 VM 有界并行，单 run 互斥及私有 HOME 保留', () => {
+  const w = YAML.parse(fs.readFileSync(path.join(root, '.github/workflows/hermes-qualification.yml'), 'utf8'))
+  assert.equal(w.jobs.qualify.strategy['max-parallel'], 2)
+  assert.equal(w.concurrency['cancel-in-progress'], false)
+  assert.equal(w.jobs.qualify['runs-on'], 'windows-2025')
+  assert.match(JSON.stringify(w.jobs.qualify.steps), /hermes-qualification-.*VARIANT/)
+})
 const sha = 'a'.repeat(40)
 const proof = () => ({ platform: 'win32', runnerEnvironment: 'github-hosted', runnerOS: 'Windows', arch: 'x64', event: 'workflow_dispatch', ref: 'refs/heads/main', repository: 'qingchencloud/clawpanel', workflowRef: 'qingchencloud/clawpanel/.github/workflows/hermes-qualification.yml@refs/heads/main', workflowSha: sha, toolingSha: sha, runId: '1234', attempt: '1', imageOS: 'win25', imageVersion: '20261016.1', virtualMachine: true, actualProfile: 'C:\\Users\\runneradmin', registeredProfile: 'C:\\Users\\runneradmin', userName: 'runneradmin', sid: 'S-1-5-21-1-2-3-1001' })
 
@@ -326,4 +334,33 @@ test('Linux Python Chromium 固定实际发布的 playwright1.58.0，不混用 n
   assert.match(body, /pip" install 'playwright==1\.58\.0'/)
   assert.doesNotMatch(body, /playwright==1\.58\.2/)
   assert.match(fs.readFileSync(script, 'utf8'), /playwright@1\.58\.2/, '保留已发布的 Windows npm 版本，不误改')
+})
+
+test('hostSnapshot UTF8 哈希命令使用唯一名称，不删 h alias，保留全部 canary', async () => {
+  const { hostSnapshot } = await load(), source = hostSnapshot.toString()
+  assert.match(source, /function Get-ClawPanelUtf8Sha256\(\$s\)/)
+  assert.match(source, /sha256=\(Get-ClawPanelUtf8Sha256 \(ConvertTo-Json -InputObject \$v -Compress\)\)/)
+  assert.equal((source.match(/Get-ClawPanelUtf8Sha256/g) || []).length, 2, '一处定义和一处循环调用覆盖三个 registry hive')
+  assert.doesNotMatch(source, /function H\(|sha256=\(H |Remove-(?:Item|Alias)|Set-Alias|New-Alias/i)
+  for (const canary of ['HKCU:', 'HKLM:', 'Environment', 'Command Processor', 'DoNotExpandEnvironmentNames', 'GetValueKind', 'Get-FileHash', 'Get-ExecutionPolicy -List', 'registry=$registry;shells=$shells;launchers=$launchers;executionPolicy=', 'parentEnvSha256']) assert.ok(source.includes(canary), canary)
+})
+
+test('独立 Windows PowerShell canary 复现 H alias 抢占；真实 hash 函数正确且不改 alias', { skip: process.platform !== 'win32' }, async () => {
+  const { hostSnapshot } = await load(), { createHash } = await import('node:crypto')
+  const definition = hostSnapshot.toString().match(/^function ([\w-]+)\(\$s\).*$/m)
+  assert.ok(definition)
+  const run = code => {
+    // 只执行提取出的纯哈希函数与常量；绝不调用 hostSnapshot 或访问真实 registry/profile。
+    assert.doesNotMatch(code, /HKCU|HKLM|Get-Item|Get-Content|Set-Item|Remove-Item|Get-FileHash|hostSnapshot/)
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 30000 })
+    assert.equal(r.status, 0, r.stderr); return JSON.parse(r.stdout.replace(/^\uFEFF/, ''))
+  }
+  const legacy = run(`$ErrorActionPreference='Stop'\n${definition[0].replace(`function ${definition[1]}(`, 'function H(')}\n$aliasBefore=(Get-Alias -Name h).Definition;try{H 'qualification-path-canary';throw 'legacy H unexpectedly succeeded'}catch{if($_.FullyQualifiedErrorId -notmatch 'GetHistoryCommand'){throw};@{aliasBefore=$aliasBefore;aliasAfter=(Get-Alias -Name h).Definition;errorId=$_.FullyQualifiedErrorId;command=$_.InvocationInfo.MyCommand.Name}|ConvertTo-Json -Compress}`)
+  assert.equal(legacy.aliasBefore, 'Get-History'); assert.equal(legacy.aliasAfter, 'Get-History')
+  assert.equal(legacy.command, 'Get-History'); assert.match(legacy.errorId, /CannotConvertArgument.*GetHistoryCommand/)
+  const values = ['C:\\qualification-canary\\bin;D:\\qualification-canary\\tools', '资格-canary-Δ', '']
+  const input = Buffer.from(JSON.stringify(values)).toString('base64')
+  const actual = run(`$ErrorActionPreference='Stop'\n${definition[0]}\n$aliasBefore=(Get-Alias -Name h).Definition;$values=ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${input}')));$hashes=@(foreach($v in $values){${definition[1]} (ConvertTo-Json -InputObject $v -Compress)});@{aliasBefore=$aliasBefore;aliasAfter=(Get-Alias -Name h).Definition;commandType=(Get-Command ${definition[1]}).CommandType.ToString();hashes=$hashes}|ConvertTo-Json -Compress`)
+  assert.equal(actual.aliasBefore, 'Get-History'); assert.equal(actual.aliasAfter, 'Get-History'); assert.equal(actual.commandType, 'Function')
+  assert.deepEqual(actual.hashes, values.map(value => createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex')))
 })

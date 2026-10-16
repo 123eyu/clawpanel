@@ -66,7 +66,8 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: 1
+      # 新旧版本使用不同一次性 VM/私有 HOME；整个手工 run 仍串行互斥。
+      max-parallel: 2
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
