@@ -421,21 +421,11 @@ jobs:
             files[name]=hashlib.sha256(blob).hexdigest()
           pathlib.Path(os.environ['EVIDENCE'],'source-sha256.json').write_text(json.dumps({'sha':sha,'files':files},indent=2))
           PY
-          # 仅一次性Linux宿主字体；Chromium在host，不向容器/产品CSS注入字体。
-          font_started=$(date +%s)
+          # 仅普通用户私有字体，不更新/安装系统包，不修改父进程fontconfig环境。
           python3 - <<'PY'
-          import runpy,pathlib,json,os
+          import runpy,pathlib,os
           helpers=runpy.run_path('tooling/scripts/hermes-qualification-browser.py')
-          pathlib.Path(os.environ['EVIDENCE'],'fontconfig-before.json').write_text(json.dumps(helpers['font_environment']('before'),ensure_ascii=False,indent=2))
-          PY
-          sudo apt-get -o Acquire::AllowInsecureRepositories=false -o APT::Get::AllowUnauthenticated=false update
-          sudo apt-get -o Acquire::AllowInsecureRepositories=false -o APT::Get::AllowUnauthenticated=false install -y --no-install-recommends fontconfig fonts-noto-cjk
-          fc-cache -f /usr/share/fonts/opentype/noto
-          FONT_SETUP_STARTED="$font_started" python3 - <<'PY'
-          import runpy,pathlib,json,os,time
-          helpers=runpy.run_path('tooling/scripts/hermes-qualification-browser.py');out=pathlib.Path(os.environ['EVIDENCE'])
-          out.joinpath('fontconfig-after.json').write_text(json.dumps(helpers['font_environment']('after'),ensure_ascii=False,indent=2))
-          out.joinpath('font-setup-timing.json').write_text(json.dumps({'elapsedSeconds':time.time()-int(os.environ['FONT_SETUP_STARTED']),'scope':'host font setup outside210s hold; visual root cause not established'}))
+          helpers['prepare_private_fonts'](pathlib.Path(os.environ['EVIDENCE']),pathlib.Path(os.environ['RUNNER_TEMP'])/('hermes-font-private-'+os.environ['VARIANT']))
           PY
           docker build --file tooling/.github/maintenance/Runtime.Dockerfile --tag hermes-qualification-trusted tooling
           sha256sum tooling/.github/maintenance/Runtime.Dockerfile tooling/scripts/maintenance-runtime-smoke.mjs tooling/scripts/hermes-qualification-bootstrap.mjs tooling/scripts/hermes-qualification-browser.py tooling/scripts/hermes-qualification-provider.mjs > "$EVIDENCE/tooling-sha256.txt"
