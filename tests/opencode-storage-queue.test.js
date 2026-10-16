@@ -5,7 +5,7 @@ import { webcrypto } from 'node:crypto'
 import { openCodeStorageBootstrap } from '../src/lib/opencode-storage-bridge.js'
 
 // 这里只隔离 child 的调度协议；原生 IDB 原子性与完整 UI 另由浏览器探针验收。
-function fixture(t) {
+function fixture(t, { now } = {}) {
   const scope = '/__opencode/queue-fixture-0123456789abcdefghijklmnopqrstuv'
   const origin = 'http://127.0.0.1:1420', listeners = new Map(), timers = new Set()
   const transactions = new Map(), durable = new Map(), starts = [], aborts = []
@@ -56,6 +56,8 @@ function fixture(t) {
   const body = { appendChild() {} }
   const context = vm.createContext({
     EventTarget, Event, DOMException, Blob, Uint8Array, crypto: webcrypto,
+    // 仅边界测试固定 child 的 wall clock；实际5000ms lease定时器仍不缩短。
+    ...(now ? { Date: class extends Date { static now() { return now() } } } : {}),
     setTimeout: later, clearTimeout: clear, parent, location: { origin },
     document: { body, getElementById() { return null }, createElement() { return { style: {}, setAttribute() {} } }, addEventListener() {} },
     addEventListener(type, listener) { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(listener) },
@@ -180,13 +182,39 @@ test('child排队数据最多32MB，abort立即释放排队数据预算', async 
 })
 
 test('排队时间计入5s事务总lease，超时不启动旧事务且释放父槽', { timeout: 9000 }, async t => {
-  const f = fixture(t), db = await f.open()
+  let clock = 0
+  const f = fixture(t, { now: () => clock }), db = await f.open()
   f.holdRequests = true
   const first = db.transaction('documents', 'readwrite'), a = f.settled(first); first.objectStore('documents').get('a')
   const next = db.transaction('blobs', 'readwrite'), b = f.settled(next); next.objectStore('blobs').get('b')
+  // 两者明确同一deadline；否则Windows上第二个可合法晚1ms到期，先开始再超时并非过期启动。
+  assert.equal(first.deadline, 5000); assert.equal(next.deadline, 5000)
+  clock = 5000
   const result = await Promise.all([a, b])
   assert.deepEqual(result, [{ ok: false, name: 'TimeoutError' }, { ok: false, name: 'TimeoutError' }])
   assert.equal(f.starts.length, 1)
   f.releaseRequests(); await delay(30)
   assert.equal(f.transactions.size, 0)
+})
+
+test('queue deadline 精确边界：尚余1ms允许启动，到期时禁止；不把合法启动当过期', async t => {
+  for (const offset of [4999, 5000]) {
+    await t.test(String(offset), async t => {
+      let clock = 0
+      const f = fixture(t, { now: () => clock }), db = await f.open()
+      f.holdRequests = true
+      const first = db.transaction('documents', 'readwrite'), a = f.settled(first)
+      first.objectStore('documents').get('a')
+      const next = db.transaction('blobs', 'readwrite'), b = f.settled(next)
+      next.objectStore('blobs').get('b')
+      await delay(20); assert.equal(f.starts.length, 1)
+      clock = offset; first.abort(); await delay(30)
+      assert.equal(f.starts.length, offset === 4999 ? 2 : 1)
+      if (offset === 4999) next.abort()
+      assert.deepEqual(await a, { ok: false, name: 'AbortError' })
+      assert.deepEqual(await b, { ok: false, name: offset === 4999 ? 'AbortError' : 'TimeoutError' })
+      f.releaseRequests(); await delay(30); assert.equal(f.transactions.size, 0)
+      assert.equal(f.durable.size, 0)
+    })
+  }
 })
