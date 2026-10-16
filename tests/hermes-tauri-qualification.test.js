@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
 
@@ -12,6 +14,23 @@ function completeFixture(NATIVE_STEPS) {
   const round = n => ({ round: n, steps: [...NATIVE_STEPS], gatewayListeners: [listener()], profiles: { active: 'default', profiles: [{ name: 'default' }] }, stopProofs: [stopped(), stopped()], samples: Array.from({ length: 42 }, (_, i) => ({ startedMs: i * 5000, finishedMs: i * 5000 + 100, health: { status: 'ok', platform: 'hermes-agent', version: '0.21.5' }, listeners: [listener()] })), elapsedSeconds: 210, observedErrors: [], historyReadbackAfterStop: true, prompts: [{ nonce: `native-${n}-a`, model: 'one' }, { nonce: `native-${n}-b`, model: 'one' }] })
   const rounds = [round(1), round(2)]
   return { completed: true, hostUnchanged: true, runtimeHome: home, gatewayPort: 18791, expectedVersion: '0.21.5', nativePage: { url: 'http://tauri.localhost/', ipc: true, windowLabel: 'main' }, rounds, cleanup: { ...stopped(), final: stopped() }, nativeInstallerLifecycle: ['update', 'uninstall', 'reinstall'].map(name => ({ name, passed: true, dataPreserved: true })), nativeProcessesExited: true, driverPortsClosed: true, provider: rounds.flatMap(x => x.prompts.map(p => ({ ...p, title: false, authenticated: true }))) }
+}
+const appSha = 'a'.repeat(40), seedSha = 'b'.repeat(40)
+const oldCommit = 'f97608f178d1ffeca59860195ab7da295f7c8e5f', newCommit = 'd923a5eb487a17c0a68801bba9ef0f56c81040a8'
+const digest = '1'.repeat(64)
+function seedFixture() {
+  const runner = { sid: 'S-1-5-21-1-2-3-4', actualProfile: 'C:\\Users\\runneradmin', runId: '123', attempt: '1', imageOS: 'win25', imageVersion: '20261016', virtualMachine: true }
+  return { appSha, seedSha, home, webOutput: 'C:\\qualification', runner, seedProof: { ...runner }, release: { version: '0.21.5', commit: oldCommit }, completion: { version: '0.21.5', commit: oldCommit }, prior: { status: 'passed-web-native-missing', candidateSha: seedSha, expectedVersion: '0.21.5', hostUnchanged: true, environment: { home, hermesHome: home + '\\.hermes', sourceSha: seedSha }, stages: ['source-isolation', 'install-privatecompletion', 'runtime-ui', 'update-stop', 'uninstall-reinstall-preserve'].map(name => ({ name, status: 'passed' })), browser: { actualChromium: true, completeReply: true, historyAfterReload: true, pageErrors: [], trace: 'trace.zip', screenshots: ['history.png'], prompts: [{ nonce: 'hq-seed', reply: 'seed reply', model: 'seed' }] } } }
+}
+function bindingFixture() {
+  return { candidateSha: appSha, rootSha: appSha, sourceHashes: Object.fromEntries(['scripts/dev-api.js', 'src-tauri/src/commands/hermes.rs', 'src-tauri/src/lib.rs', 'src-tauri/Cargo.lock', 'package.json'].map(f => [f, digest])), sourceManifestSha256: digest, application: { path: 'C:\\candidate\\clawpanel.exe', sha256: digest }, build: { status: 'passed', candidateSha: appSha, hostUnchanged: true, sourceManifestSha256: digest, application: { path: 'C:\\candidate\\clawpanel.exe', sha256: digest } } }
+}
+function compatibilityFixture(NATIVE_STEPS) {
+  const r = completeFixture(NATIVE_STEPS)
+  delete r.nativeInstallerLifecycle
+  Object.assign(r, { mode: 'new-app-old-runtime-native', status: 'passed-native-old-runtime-compatibility', seedSha, candidateSha: appSha, ipc: [], application: bindingFixture().application, webQualification: { path: 'C:\\qualification', sha256: digest } })
+  r.compatibility = { seed: seedFixture(), appPin: { version: '0.22.2', commit: newCommit }, binding: bindingFixture(), blockedInstallerCommands: [], runtimeChecks: ['before-ui', 'after-round-1', 'after-round-2', 'after-ui'].map(phase => ({ phase, installed: true, version: '0.21.5', commit: oldCommit, hermesHome: home + '\\.hermes' })), finalRuntimeHead: oldCommit, seedMemoryPreserved: true, seedHistoryPreserved: true }
+  return r
 }
 
 test('实际 Rust 配置目录契约是对象，拒绝字符串、缺失配置和其他 HOME', async () => {
@@ -224,4 +243,76 @@ test('native Provider只读metadata逐项404留证，不当聊天；unknown/坏J
     })
     assert.equal(getWithBody, 500); assert.ok(report.providerError); assert.equal(report.metadata.length, 4)
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
+})
+
+test('兼容参数固定21.5与两个不同完整SHA，非seed模式仍保留完整安装资格', async () => {
+  const { nativeArgs } = await load()
+  assert.equal(nativeArgs(['--sha', appSha, '--seed-sha', seedSha, '--version', '0.21.5'])['--seed-sha'], seedSha)
+  for (const args of [ ['--seed-sha', 'main'], ['--seed-sha', seedSha], ['--sha', appSha, '--seed-sha', appSha, '--version', '0.21.5'], ['--sha', appSha, '--seed-sha', seedSha, '--version', '0.22.2'] ]) assert.throws(() => nativeArgs(args))
+})
+
+test('兼容seed必须完整旧Web生命周期、同VM、精确HOME与旧source pin', async () => {
+  const { assertNativeCompatibilitySeed } = await load()
+  assert.equal(typeof assertNativeCompatibilitySeed, 'function')
+  assert.doesNotThrow(() => assertNativeCompatibilitySeed(seedFixture()))
+  for (const mutate of [ x => { delete x.seedSha }, x => { x.prior.candidateSha = appSha }, x => { x.prior.status = 'failed' }, x => { x.prior.stages.pop() }, x => { x.prior.environment.home += '-other' }, x => { x.home += '-other' }, x => { x.seedProof.runId = 'other' }, x => { x.seedProof.sid += '-other' }, x => { x.release.commit = newCommit }, x => { x.completion.version = '0.22.2' }, x => { x.prior.browser.pageErrors.push('bad') }, x => { x.prior.hostUnchanged = false } ]) { const x = seedFixture(); mutate(x); assert.throws(() => assertNativeCompatibilitySeed(x)) }
+})
+
+test('新app必须真实22.2双端pin，build应用与完整新源码绑定不接受旧seed清单', async () => {
+  const { assertNativeCompatibilityPins, assertNativeCompatibilityBinding } = await load()
+  assert.equal(typeof assertNativeCompatibilityPins, 'function'); assert.equal(typeof assertNativeCompatibilityBinding, 'function')
+  const pins = { web: `const HERMES_STABLE_VERSION = '0.22.2'\nconst HERMES_STABLE_COMMIT = '${newCommit}'`, rust: `const HERMES_STABLE_VERSION: &str = "0.22.2";\nconst HERMES_STABLE_COMMIT: &str = "${newCommit}";` }
+  assert.deepEqual(assertNativeCompatibilityPins(pins), { version: '0.22.2', commit: newCommit })
+  for (const key of ['web', 'rust']) { assert.throws(() => assertNativeCompatibilityPins({ ...pins, [key]: pins[key].replace('0.22.2', '0.21.5') })); assert.throws(() => assertNativeCompatibilityPins({ ...pins, [key]: pins[key].replace(newCommit, oldCommit) })) }
+  assert.doesNotThrow(() => assertNativeCompatibilityBinding(bindingFixture()))
+  for (const mutate of [ x => { x.rootSha = seedSha }, x => { x.sourceHashes = {} }, x => { x.build.candidateSha = seedSha }, x => { x.build.application.sha256 = '2'.repeat(64) }, x => { x.build.application.path += '-other' }, x => { x.build.sourceManifestSha256 = '2'.repeat(64) }, x => { x.build.status = 'failed' } ]) { const x = bindingFixture(); mutate(x); assert.throws(() => assertNativeCompatibilityBinding(x)) }
+})
+
+test('兼容IPC在送出前拒绝所有installer，普通真实W3C IPC仍送出并留证', async () => {
+  const { NativeWebDriver } = await load()
+  const calls = []
+  const server = http.createServer(async (req, res) => { let body = ''; for await (const b of req) body += b; calls.push(JSON.parse(body)); res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ value: { ok: true, value: { installed: true } } })) })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const client = new NativeWebDriver(`http://127.0.0.1:${server.address().port}`, { compatibility: true }); client.session = 'actual-protocol-test'
+    for (const cmd of ['install_hermes', 'update_hermes', 'uninstall_hermes']) await assert.rejects(client.ipc(cmd), /installer|安装/)
+    assert.equal(calls.length, 0)
+    assert.deepEqual(client.blockedInstallerCommands, ['install_hermes', 'update_hermes', 'uninstall_hermes'])
+    assert.equal((await client.ipc('check_hermes')).installed, true); assert.equal(calls.length, 1); assert.equal(calls[0].args[0], 'check_hermes')
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
+})
+
+test('兼容独立门禁：缺seed/偷调installer/少UI/升级旧source均红，绝不补绿full', async () => {
+  const { assertNativeCompatibilityComplete, assertNativeComplete, NATIVE_STEPS } = await load()
+  assert.equal(typeof assertNativeCompatibilityComplete, 'function')
+  const good = compatibilityFixture(NATIVE_STEPS)
+  assert.doesNotThrow(() => assertNativeCompatibilityComplete(good)); assert.throws(() => assertNativeComplete(good))
+  assert.throws(() => assertNativeCompatibilityComplete(completeFixture(NATIVE_STEPS)))
+  for (const mutate of [ x => { delete x.seedSha }, x => { x.candidateSha = seedSha }, x => { x.expectedVersion = '0.22.2' }, x => { x.runtimeHome += '-other' }, x => { x.compatibility.appPin.commit = oldCommit }, x => { x.compatibility.binding.rootSha = seedSha }, x => { x.application.sha256 = '3'.repeat(64) }, x => { x.ipc.push({ cmd: 'install_hermes', ok: false }) }, x => { x.compatibility.blockedInstallerCommands.push('update_hermes') }, x => { x.nativeInstallerLifecycle = [] }, x => { x.rounds.pop() }, x => { x.rounds[0].steps.pop() }, x => { x.rounds[0].samples.pop() }, x => { x.rounds[0].elapsedSeconds = 209 }, x => { x.compatibility.runtimeChecks[2].commit = newCommit }, x => { x.compatibility.runtimeChecks[0].version = '0.22.2' }, x => { x.compatibility.runtimeChecks.pop() }, x => { x.compatibility.finalRuntimeHead = newCommit }, x => { x.compatibility.seedHistoryPreserved = false }, x => { x.compatibility.seedMemoryPreserved = false }, x => { x.hostUnchanged = false } ]) { const x = structuredClone(good); mutate(x); assert.throws(() => assertNativeCompatibilityComplete(x)) }
+  const forged = structuredClone(good); forged.nativeInstallerLifecycle = completeFixture(NATIVE_STEPS).nativeInstallerLifecycle; assert.throws(() => assertNativeComplete(forged))
+  for (const status of [undefined, 'failed', 'passed-native-tauri']) { const bad = structuredClone(good); bad.status = status; assert.throws(() => assertNativeCompatibilityComplete(bad)) }
+})
+
+test('兼容新source读取绑定实际Git blob与build manifest，篡改源码或EXE先红', async () => {
+  const { readNativeCompatibilityBinding } = await load()
+  assert.equal(typeof readNativeCompatibilityBinding, 'function')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-native-compat-source-'))
+  try {
+    const git = args => { const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim() }
+    git(['init', '-q']); git(['config', 'user.email', 'fixture@example.invalid']); git(['config', 'user.name', 'fixture'])
+    const files = Object.keys(bindingFixture().sourceHashes)
+    for (const f of files) { fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true }); fs.writeFileSync(path.join(dir, f), 'fixture\n') }
+    git(['add', '--', ...files]); git(['-c', 'core.autocrlf=false', 'commit', '-qm', 'fixture'])
+    const sha = git(['rev-parse', 'HEAD']), app = path.join(dir, 'clawpanel.exe'), manifest = path.join(dir, 'source-sha256.json'), receipt = path.join(dir, 'build-receipt.json')
+    fs.writeFileSync(app, 'fixture exe')
+    const crypto = await import('node:crypto'), hash = f => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex')
+    fs.writeFileSync(manifest, JSON.stringify({ sha, files: Object.fromEntries(files.map(f => [f, hash(path.join(dir, f))])) }))
+    fs.writeFileSync(receipt, JSON.stringify({ status: 'passed', candidateSha: sha, hostUnchanged: true, sourceManifestSha256: hash(manifest), application: { path: app, sha256: hash(app) } }))
+    assert.doesNotThrow(() => readNativeCompatibilityBinding({ root: dir, app, sha, buildReceipt: receipt }))
+    fs.appendFileSync(app, 'changed'); assert.throws(() => readNativeCompatibilityBinding({ root: dir, app, sha, buildReceipt: receipt })); fs.writeFileSync(app, 'fixture exe')
+    fs.appendFileSync(path.join(dir, files[0]), 'changed'); assert.throws(() => readNativeCompatibilityBinding({ root: dir, app, sha, buildReceipt: receipt }))
+  } finally {
+    assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(dir).startsWith('hermes-native-compat-source-'), '只清理本测试独占临时目录')
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })

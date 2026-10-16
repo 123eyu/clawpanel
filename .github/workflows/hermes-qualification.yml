@@ -214,6 +214,34 @@ jobs:
         run: |
           node tooling/scripts/test-hermes-tauri-qualification.mjs --execute --root candidate --sha "$env:CANDIDATE_SHA" --version "$env:EXPECTED_VERSION" --web-output "$env:RUNNER_TEMP/hermes-qualification-$env:VARIANT" --output "$env:RUNNER_TEMP/hermes-native-$env:VARIANT" --application "$env:GITHUB_WORKSPACE/candidate/src-tauri/target/release/clawpanel.exe" --driver "$env:NATIVE_TAURI_ROOT/bin/tauri-driver.exe" --native-driver "$env:NATIVE_EDGE_DRIVER"
           exit $LASTEXITCODE
+      - name: 旧版完整 native 成功后独立 checkout 新应用（不覆盖旧种子）
+        id: compat_checkout
+        if: matrix.variant == 'old' && inputs.target == 'both' && steps.native.outcome == 'success'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: candidate-compat
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - name: 新应用独立 no-bundle 构建，复用旧 HOME 的私有 Rust 工具链
+        id: compat_build
+        if: matrix.variant == 'old' && inputs.target == 'both' && steps.native.outcome == 'success'
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          SEED_SHA: ${{ matrix.sha }}
+        run: |
+          node tooling/scripts/test-hermes-compat-build.mjs --execute --root candidate-compat --sha "$env:CANDIDATE_SHA" --seed-sha "$env:SEED_SHA" --web-output "$env:RUNNER_TEMP/hermes-qualification-old" --native-output "$env:RUNNER_TEMP/hermes-native-old" --output "$env:RUNNER_TEMP/hermes-native-build-old-runtime-compatibility"
+          exit $LASTEXITCODE
+      - name: 新应用操控既有 0.21.5，两轮真实 native（禁止内核安装生命周期）
+        id: native_compatibility
+        if: matrix.variant == 'old' && inputs.target == 'both' && steps.native.outcome == 'success'
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          SEED_SHA: ${{ matrix.sha }}
+        run: |
+          node tooling/scripts/test-hermes-tauri-qualification.mjs --execute --root candidate-compat --sha "$env:CANDIDATE_SHA" --seed-sha "$env:SEED_SHA" --version 0.21.5 --web-output "$env:RUNNER_TEMP/hermes-qualification-old" --output "$env:RUNNER_TEMP/hermes-native-old-runtime-compatibility" --application "$env:GITHUB_WORKSPACE/candidate-compat/src-tauri/target/release/clawpanel.exe" --driver "$env:NATIVE_TAURI_ROOT/bin/tauri-driver.exe" --native-driver "$env:NATIVE_EDGE_DRIVER"
+          exit $LASTEXITCODE
       - name: Web/native 独立原报告汇总，native 缺失或任一门禁失败均红
         id: native_summary
         if: always()
@@ -222,14 +250,18 @@ jobs:
           CANDIDATE_SHA: ${{ matrix.sha }}
           EXPECTED_VERSION: ${{ matrix.version }}
           VARIANT: ${{ matrix.variant }}
+          TARGET: ${{ inputs.target }}
+          COMPAT_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
           @'
           import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import crypto from 'node:crypto';
-          import {assertSameSource,assertHostUnchanged} from './tooling/scripts/test-hermes-windows-qualification.mjs';import {assertNativeComplete} from './tooling/scripts/test-hermes-tauri-qualification.mjs';
+          import {assertSameSource,assertHostUnchanged} from './tooling/scripts/test-hermes-windows-qualification.mjs';import {assertNativeComplete,assertNativeCompatibilityComplete} from './tooling/scripts/test-hermes-tauri-qualification.mjs';
           const base=process.env.RUNNER_TEMP,v=process.env.VARIANT,output=path.join(base,'hermes-summary-'+v);assert.ok(!fs.existsSync(output));fs.mkdirSync(output);
           const read=f=>JSON.parse(fs.readFileSync(f,'utf8')),hash=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
-          const report={status:'failed',candidateSha:process.env.CANDIDATE_SHA,expectedVersion:process.env.EXPECTED_VERSION,nativeMissing:true};
+          const compatibilityRequired=v==='old'&&process.env.TARGET==='both';
+          const report={status:'failed',candidateSha:process.env.CANDIDATE_SHA,expectedVersion:process.env.EXPECTED_VERSION,nativeMissing:true,nativeCompatibility:{required:compatibilityRequired,status:compatibilityRequired?'missing':'not-run',scope:'new app / existing 0.21.5 native only; Windows Web compatibility not covered',reason:compatibilityRequired?'both old job requires original compatibility evidence':'only both old job runs compatibility; not a compatibility pass'}};
           try{
+            assert.ok(['baseline','candidate','both'].includes(process.env.TARGET));assert.ok(['old','new'].includes(v));
             const web=read(path.join(base,'hermes-qualification-'+v,'report.json')),native=read(path.join(base,'hermes-native-'+v,'report.json')),build=read(path.join(base,'hermes-native-build-'+v,'build-receipt.json'));report.nativeMissing=false;
             assert.equal(web.status,'passed-web-native-missing');assert.equal(native.status,'passed-native-tauri');assert.equal(build.status,'passed');
             for(const r of [web,native,build])assert.equal(r.candidateSha,process.env.CANDIDATE_SHA);for(const r of [web,native])assert.equal(r.expectedVersion,process.env.EXPECTED_VERSION);
@@ -237,6 +269,22 @@ jobs:
             assert.equal(hash(build.application.path),build.application.sha256);assert.equal(native.application.sha256,build.application.sha256);
             // 不同 step 的 GitHub 临时 env 会变化；各 step 自己仍做完整 parentEnvSha256 比较。跨层再比较原机器事实。
             const {parentEnvSha256:webEnv,...machineBefore}=read(path.join(base,'hermes-qualification-'+v,'host-before.json')),{parentEnvSha256:nativeEnv,...machineAfter}=read(path.join(base,'hermes-native-'+v,'host-after.json'));assertHostUnchanged(machineBefore,machineAfter);
+            if(compatibilityRequired){
+              const sha=process.env.COMPAT_CANDIDATE_SHA;assert.match(sha,/^[a-f0-9]{40}$/);assert.notEqual(sha,process.env.CANDIDATE_SHA);assert.equal(process.env.EXPECTED_VERSION,'0.21.5');
+              const compatRoot=path.resolve('candidate-compat'),buildRoot=path.join(base,'hermes-native-build-old-runtime-compatibility'),nativeRoot=path.join(base,'hermes-native-old-runtime-compatibility');
+              const buildFile=path.join(buildRoot,'build-receipt.json'),nativeFile=path.join(nativeRoot,'report.json'),manifestFile=path.join(buildRoot,'source-sha256.json');
+              const compatBuild=read(buildFile),compat=read(nativeFile),manifest=read(manifestFile);assertNativeCompatibilityComplete(compat);
+              assert.equal(compatBuild.status,'passed');assert.equal(compatBuild.hostUnchanged,true);assert.ok(!compatBuild.error&&!compatBuild.cleanupOrDriftError);
+              for(const r of [compatBuild,compat]){assert.equal(r.candidateSha,sha);assert.equal(r.seedSha,process.env.CANDIDATE_SHA)}
+              assert.equal(compatBuild.seedCommit,'f97608f178d1ffeca59860195ab7da295f7c8e5f');assert.equal(manifest.sha,sha);assert.deepEqual(compatBuild.source,manifest);
+              assert.ok(Object.keys(manifest.files).length);assertSameSource(compatRoot,manifest.files);assert.deepEqual(compat.compatibility.binding.sourceHashes,manifest.files);
+              assert.equal(hash(manifestFile),compatBuild.sourceManifestSha256);assert.equal(compat.compatibility.binding.sourceManifestSha256,compatBuild.sourceManifestSha256);assert.equal(compat.compatibility.binding.buildReceiptSha256,hash(buildFile));
+              const app=path.join(compatRoot,'src-tauri/target/release/clawpanel.exe');assert.equal(path.resolve(compatBuild.application.path),app);assert.equal(path.resolve(compat.application.path),app);
+              assert.equal(hash(app),compatBuild.application.sha256);assert.equal(compat.application.sha256,compatBuild.application.sha256);
+              assert.equal(compatBuild.seedWebReportSha256,hash(path.join(base,'hermes-qualification-old','report.json')));assert.equal(compatBuild.seedNativeReportSha256,hash(path.join(base,'hermes-native-old','report.json')));assert.equal(compat.webQualification.sha256,compatBuild.seedWebReportSha256);
+              for(const dir of [buildRoot,nativeRoot]){const before=read(path.join(dir,'host-before.json')),after=read(path.join(dir,'host-after.json'));assertHostUnchanged(before,after);const {parentEnvSha256,...machine}=after;assertHostUnchanged(machineBefore,machine)}
+              report.nativeCompatibility={required:true,status:compat.status,scope:report.nativeCompatibility.scope,candidateSha:sha,seedSha:process.env.CANDIDATE_SHA,application:compatBuild.application,evidence:{buildSha256:hash(buildFile),nativeSha256:hash(nativeFile),sourceManifestSha256:hash(manifestFile),buildToolingSha256:hash('tooling/scripts/test-hermes-compat-build.mjs')}};
+            }
             report.status='passed-web-and-native';report.webStatus=web.status;report.nativeStatus=native.status;report.rounds=native.rounds.length;report.application=build.application;report.tooling={sha:process.env.GITHUB_WORKFLOW_SHA,harnessSha256:hash('tooling/scripts/test-hermes-tauri-qualification.mjs'),qualificationSha256:hash('tooling/scripts/test-hermes-windows-qualification.mjs')};report.evidence={webSha256:hash(path.join(base,'hermes-qualification-'+v,'report.json')),nativeSha256:hash(path.join(base,'hermes-native-'+v,'report.json')),buildSha256:hash(path.join(base,'hermes-native-build-'+v,'build-receipt.json'))};
           }catch(e){report.error=e.stack;process.exitCode = 1}
           fs.writeFileSync(path.join(output,'qualification-summary.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({status:report.status,nativeMissing:report.nativeMissing,output}));
@@ -252,6 +300,7 @@ jobs:
           import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {publishEvidence} from './tooling/scripts/test-hermes-windows-qualification.mjs';
           const base=process.env.RUNNER_TEMP,v=process.env.VARIANT,roots={};
           for(const [label,prefix]of Object.entries({web:'hermes-qualification-',native:'hermes-native-',build:'hermes-native-build-',summary:'hermes-summary-'})){const p=path.join(base,prefix+v);if(fs.existsSync(p))roots[label]=p}
+          if(v==='old')for(const [label,name]of Object.entries({'compat-build':'hermes-native-build-old-runtime-compatibility','compat-native':'hermes-native-old-runtime-compatibility'})){const p=path.join(base,name);if(fs.existsSync(p))roots[label]=p}
           assert.ok(Object.keys(roots).length,'没有可保留的原始证据');await publishEvidence({roots,output:path.join(base,'hermes-public-'+v)});
           '@ | node --input-type=module
           exit $LASTEXITCODE

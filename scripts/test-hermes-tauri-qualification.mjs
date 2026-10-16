@@ -13,6 +13,12 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
 const inside = (root, file) => { const r = path.relative(root, file); return r !== '..' && !r.startsWith('..' + path.sep) && !path.isAbsolute(r) }
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''))
+const OLD_RUNTIME = { version: '0.21.5', commit: 'f97608f178d1ffeca59860195ab7da295f7c8e5f' }
+const NEW_APP_PIN = { version: '0.22.2', commit: 'd923a5eb487a17c0a68801bba9ef0f56c81040a8' }
+const COMPATIBILITY_MODE = 'new-app-old-runtime-native'
+const COMPATIBILITY_STATUS = 'passed-native-old-runtime-compatibility'
+const installerCommand = cmd => ['install_hermes', 'update_hermes', 'uninstall_hermes'].includes(cmd)
+const nativePath = p => path.win32.isAbsolute(p) ? path.win32.resolve(p).toLowerCase() : path.resolve(p)
 export const NATIVE_STEPS = [
   'native-window-rust-ipc-gateway-online', 'actual-native-send-button-complete-reply',
   'native-refresh-restores-real-history', 'native-sustained-210s-42-health',
@@ -20,12 +26,12 @@ export const NATIVE_STEPS = [
   'native-post-restart-full-reply', 'native-dashboard-profiles-stop-and-data-retained',
 ]
 
-export function nativePlan() {
-  return { installsOnLocalHost: false, webdriver: 'tauri-driver + Microsoft Edge Driver', uiRounds: 2, holdSeconds: 210, webFallback: false, productPluginsAdded: false }
+export function nativePlan(o = {}) {
+  return { installsOnLocalHost: false, webdriver: 'tauri-driver + Microsoft Edge Driver', uiRounds: 2, holdSeconds: 210, webFallback: false, productPluginsAdded: false, ...(o['--seed-sha'] ? { mode: COMPATIBILITY_MODE, seedSha: o['--seed-sha'], candidateSha: o['--sha'], runtimeVersion: OLD_RUNTIME.version, installerLifecycle: 'forbidden', fullInstallationQualification: false, windowsWebCompatibility: 'not-covered' } : {}) }
 }
 
 export function nativeArgs(argv) {
-  const values = new Set(['--root', '--sha', '--version', '--web-output', '--output', '--application', '--driver', '--native-driver', '--hold'])
+  const values = new Set(['--root', '--sha', '--seed-sha', '--version', '--web-output', '--output', '--application', '--driver', '--native-driver', '--hold'])
   const o = {}
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i]
@@ -36,6 +42,11 @@ export function nativeArgs(argv) {
   if (o['--sha']) assert.match(o['--sha'], /^[a-f0-9]{40}$/, 'SHA 必须完整且精确')
   if (o['--version']) assert.match(o['--version'], /^0\.\d+\.\d+$/, '版本必须精确')
   if (o['--hold']) assert.equal(o['--hold'], '210', '保留210秒验收，不缩短')
+  if (o['--seed-sha']) {
+    assert.match(o['--seed-sha'], /^[a-f0-9]{40}$/, 'seed SHA 必须完整且精确')
+    assert.ok(o['--sha'] && o['--sha'] !== o['--seed-sha'], '兼容模式必须是新app SHA与不同的旧seed SHA')
+    assert.equal(o['--version'], OLD_RUNTIME.version, '兼容模式固定既有0.21.5，不升级runtime')
+  }
   assert.ok(!(o['--execute'] && o['--plan']), '模式互斥')
   return o
 }
@@ -131,13 +142,11 @@ export async function runNativeCleanup(steps) {
   return failures
 }
 
-export function assertNativeComplete(r) {
+function assertNativeUiComplete(r) {
   assertNativePage(r.nativePage)
   assert.ok(r.completed && r.hostUnchanged && r.nativeProcessesExited && r.driverPortsClosed)
   assert.ok(!r.error && !r.cleanupError && !r.hostOrSourceError && !r.providerError)
   assert.equal(r.rounds.length, 2)
-  assert.deepEqual(r.nativeInstallerLifecycle?.map(x => x.name), ['update', 'uninstall', 'reinstall'])
-  assert.ok(r.nativeInstallerLifecycle.every(x => x.passed && x.dataPreserved))
   for (const round of r.rounds) {
     assert.deepEqual(round.steps, NATIVE_STEPS)
     assert.equal(round.samples.length, 42)
@@ -158,6 +167,82 @@ export function assertNativeComplete(r) {
     assert.ok(proof.identities.every(p => r.cleanup.final.identities.some(last => identityKey(last) === identityKey(p))), '最终清理漏掉已观察 runtime 身份')
     assert.ok(proof.ports.every(port => r.cleanup.final.ports.includes(port)), '最终清理漏掉已观察 runtime 端口')
   }
+}
+
+export function assertNativeComplete(r) {
+  assert.ok(!r.seedSha && !r.compatibility && r.mode !== COMPATIBILITY_MODE && r.status !== COMPATIBILITY_STATUS, '兼容验收不属于完整安装资格')
+  assertNativeUiComplete(r)
+  assert.deepEqual(r.nativeInstallerLifecycle?.map(x => x.name), ['update', 'uninstall', 'reinstall'])
+  assert.ok(r.nativeInstallerLifecycle.every(x => x.passed && x.dataPreserved))
+}
+
+export function assertNativeCompatibilitySeed(s) {
+  assert.match(s.seedSha, /^[a-f0-9]{40}$/); assert.match(s.appSha, /^[a-f0-9]{40}$/); assert.notEqual(s.seedSha, s.appSha)
+  const p = s.prior
+  assert.equal(p.status, 'passed-web-native-missing'); assert.equal(p.candidateSha, s.seedSha); assert.equal(p.expectedVersion, OLD_RUNTIME.version)
+  assert.equal(p.hostUnchanged, true); assert.ok(!p.error && !p.cleanupError && !p.stopError && !p.providerError)
+  assert.deepEqual(p.stages.map(x => x.name), ['source-isolation', 'install-privatecompletion', 'runtime-ui', 'update-stop', 'uninstall-reinstall-preserve'])
+  assert.ok(p.stages.every(x => x.status === 'passed'))
+  assert.ok(p.browser?.actualChromium && p.browser.completeReply && p.browser.historyAfterReload && p.browser.trace && p.browser.screenshots?.length && p.browser.prompts?.length)
+  assert.deepEqual(p.browser.pageErrors, [])
+  assert.equal(nativePath(s.home), nativePath(path.win32.isAbsolute(s.webOutput) ? path.win32.join(s.webOutput, 'h') : path.join(s.webOutput, 'h')))
+  assert.equal(nativePath(p.environment.home), nativePath(s.home)); assert.equal(p.environment.sourceSha, s.seedSha)
+  assert.equal(nativePath(p.environment.hermesHome), nativePath(path.join(s.home, '.hermes')))
+  for (const key of ['sid', 'actualProfile', 'runId', 'attempt', 'imageOS', 'imageVersion']) { assert.ok(s.runner[key]); assert.equal(s.seedProof[key], s.runner[key], `seed非同VM/run: ${key}`) }
+  assert.equal(s.seedProof.virtualMachine, true); assert.equal(s.runner.virtualMachine, true)
+  for (const release of [s.release, s.completion]) { assert.equal(release.version, OLD_RUNTIME.version); assert.equal(release.commit, OLD_RUNTIME.commit) }
+}
+
+export function assertNativeCompatibilityPins({ rust, web }) {
+  for (const [source, language] of [[rust, 'Rust'], [web, 'Web']]) {
+    const version = source.match(/const HERMES_STABLE_VERSION(?:\s*:\s*&str)?\s*=\s*['"]([^'"]+)['"]/)?.[1]
+    const commit = source.match(/const HERMES_STABLE_COMMIT(?:\s*:\s*&str)?\s*=\s*['"]([^'"]+)['"]/)?.[1]
+    assert.equal(version, NEW_APP_PIN.version, `${language} 新app pin不是22.2`); assert.equal(commit, NEW_APP_PIN.commit, `${language} 新app源码pin不符`)
+  }
+  return { ...NEW_APP_PIN }
+}
+
+export function assertNativeCompatibilityBinding(b) {
+  assert.match(b.candidateSha, /^[a-f0-9]{40}$/); assert.equal(b.rootSha, b.candidateSha)
+  for (const file of ['scripts/dev-api.js', 'src-tauri/src/commands/hermes.rs', 'src-tauri/src/lib.rs', 'src-tauri/Cargo.lock', 'package.json']) assert.match(b.sourceHashes?.[file] || '', /^[a-f0-9]{64}$/, `缺新app源码hash ${file}`)
+  assert.ok(Object.values(b.sourceHashes).every(h => /^[a-f0-9]{64}$/.test(h)))
+  assert.equal(b.build.status, 'passed'); assert.equal(b.build.candidateSha, b.candidateSha); assert.equal(b.build.hostUnchanged, true); assert.ok(!b.build.error)
+  assert.match(b.sourceManifestSha256, /^[a-f0-9]{64}$/); assert.equal(b.build.sourceManifestSha256, b.sourceManifestSha256)
+  assert.match(b.application.sha256, /^[a-f0-9]{64}$/); assert.equal(b.build.application.sha256, b.application.sha256); assert.equal(nativePath(b.build.application.path), nativePath(b.application.path))
+}
+
+export function readNativeCompatibilityBinding({ root, app, sha, buildReceipt }) {
+  const git = args => { const r = spawnSync('git', ['--no-optional-locks', '-C', root, ...args], { windowsHide: true, timeout: 30000, maxBuffer: 128 * 1024 * 1024 }); assert.equal(r.status, 0, r.stderr?.toString()); return r.stdout }
+  const rootSha = git(['rev-parse', 'HEAD']).toString().trim(); assert.equal(rootSha, sha)
+  assert.equal(git(['status', '--porcelain', '--untracked-files=no']).toString().trim(), '', '新app工作树存在tracked改动')
+  const sourceHashes = {}
+  for (const entry of git(['ls-tree', '-rz', '--full-tree', sha]).toString().split('\0').filter(Boolean)) {
+    const match = entry.match(/^(100644|100755) blob ([a-f0-9]{40})\t(.+)$/); assert.ok(match, '拒绝新app特殊Git entry')
+    const [, , oid, file] = match, actual = physical(path.join(root, file)); assert.ok(inside(root, actual))
+    const bytes = git(['show', `${sha}:${file}`])
+    assert.equal(crypto.createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'), oid)
+    const expected = crypto.createHash('sha256').update(bytes).digest('hex'); assert.equal(hash(actual), expected, `新app源码字节不符 ${file}`); sourceHashes[file] = expected
+  }
+  const manifestFile = physical(path.join(path.dirname(buildReceipt), 'source-sha256.json')), manifest = read(manifestFile)
+  assert.equal(manifest.sha, sha); assert.deepEqual(manifest.files, sourceHashes, 'build manifest不属于完整新app源码')
+  const binding = { candidateSha: sha, rootSha, sourceHashes, sourceManifestSha256: hash(manifestFile), application: { path: app, sha256: hash(app) }, build: read(physical(buildReceipt)), buildReceiptSha256: hash(buildReceipt) }
+  assertNativeCompatibilityBinding(binding); return binding
+}
+
+export function assertNativeCompatibilityComplete(r) {
+  assert.equal(r.status, COMPATIBILITY_STATUS, '兼容报告必须使用独立成功status')
+  assert.equal(r.mode, COMPATIBILITY_MODE); assert.equal(r.expectedVersion, OLD_RUNTIME.version)
+  assert.ok(!Object.hasOwn(r, 'nativeInstallerLifecycle'), '兼容模式不得执行installer lifecycle')
+  const c = r.compatibility; assert.ok(c)
+  assertNativeCompatibilitySeed(c.seed); assert.equal(r.seedSha, c.seed.seedSha); assert.equal(r.candidateSha, c.seed.appSha); assert.equal(nativePath(r.runtimeHome), nativePath(c.seed.home))
+  assert.equal(nativePath(r.webQualification.path), nativePath(c.seed.webOutput)); assert.match(r.webQualification.sha256, /^[a-f0-9]{64}$/)
+  assert.deepEqual(c.appPin, NEW_APP_PIN); assertNativeCompatibilityBinding(c.binding); assert.equal(c.binding.candidateSha, r.candidateSha)
+  assert.deepEqual(r.application.path, c.binding.application.path); assert.equal(r.application.sha256, c.binding.application.sha256)
+  assert.deepEqual(c.blockedInstallerCommands, []); assert.ok(Array.isArray(r.ipc) && !r.ipc.some(x => installerCommand(x.cmd)), '兼容模式出现installer IPC尝试')
+  assert.deepEqual(c.runtimeChecks.map(x => x.phase), ['before-ui', 'after-round-1', 'after-round-2', 'after-ui'])
+  for (const check of c.runtimeChecks) { assert.equal(check.installed, true); assert.equal(check.version, OLD_RUNTIME.version); assert.equal(check.commit, OLD_RUNTIME.commit); assert.equal(nativePath(check.hermesHome), nativePath(path.join(r.runtimeHome, '.hermes'))) }
+  assert.equal(c.finalRuntimeHead, OLD_RUNTIME.commit); assert.equal(c.seedMemoryPreserved, true); assert.equal(c.seedHistoryPreserved, true)
+  assertNativeUiComplete(r)
 }
 
 export async function createNativeProvider({ report, save = () => {} }) {
@@ -197,10 +282,11 @@ export async function createNativeProvider({ report, save = () => {} }) {
 }
 
 export class NativeWebDriver {
-  constructor(base) {
+  constructor(base, { compatibility = false } = {}) {
     const u = new URL(base)
     assert.ok(u.protocol === 'http:' && u.hostname === '127.0.0.1', 'WebDriver 只接受回环')
     this.base = u.origin; this.session = null; this.events = []
+    this.compatibility = compatibility; this.blockedInstallerCommands = []
   }
   async request(method, route, body, timeout = 120000) {
     const start = performance.now()
@@ -221,6 +307,7 @@ export class NativeWebDriver {
   command(method, route, body, timeout) { assert.ok(this.session); return this.request(method, `/session/${this.session}${route}`, body, timeout) }
   script(script, args = []) { return this.command('POST', '/execute/sync', { script, args }) }
   async ipc(cmd, args = {}, timeout = 120000) {
+    if (this.compatibility && installerCommand(cmd)) { this.blockedInstallerCommands.push(cmd); throw new Error(`兼容模式禁止installer IPC: ${cmd}`) }
     if (timeout !== 120000) await this.command('POST', '/timeouts', { script: timeout })
     try {
       const data = await this.command('POST', '/execute/async', { script: `const [cmd,args,done]=arguments; if(!window.__TAURI__?.core?.invoke){done({ok:false,error:'missing native IPC'});return} window.__TAURI__.core.invoke(cmd,args).then(value=>done({ok:true,value}),error=>done({ok:false,error:String(error)}));`, args: [cmd, args] }, timeout)
@@ -274,7 +361,8 @@ async function execute(o) {
   assert.ok(inside(physical(process.env.RUNNER_TEMP), output) && !fs.existsSync(output), 'native 输出必须是 RUNNER_TEMP 内全新目录')
   const prior = read(path.join(webOutput, 'report.json'))
   assert.equal(prior.status, 'passed-web-native-missing', '先完成真实 Web/安装生命周期，不用自述 receipt')
-  assert.equal(prior.candidateSha, o['--sha'])
+  const compatibility = !!o['--seed-sha']
+  assert.equal(prior.candidateSha, compatibility ? o['--seed-sha'] : o['--sha'])
   const home = physical(path.join(webOutput, 'h')), app = physical(o['--application'])
   assert.ok(fs.statSync(home).isDirectory() && inside(root, app) && /clawpanel\.exe$/i.test(app), '应用或安装 HOME 越界')
   const git = spawnSync('git', ['--no-optional-locks', '-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true })
@@ -282,6 +370,18 @@ async function execute(o) {
   fs.mkdirSync(output)
   const report = { schemaVersion: 1, status: 'failed', candidateSha: o['--sha'], expectedVersion: o['--version'], runtimeHome: home, startedAt: new Date().toISOString(), scope: 'actual ClawPanel.exe / WebView2 / Rust IPC / W3C native driver', runner: proof, webQualification: { path: webOutput, sha256: hash(path.join(webOutput, 'report.json')) }, application: { path: app, sha256: hash(app) }, rounds: [], ipc: [], provider: [], nativePage: null, cleanup: null, errorObservationScope: 'observed flows only after error listener installation; excludes pre-attachment startup and every refresh until listeners are reinstalled; not a whole-lifecycle zero-error claim' }
   const save = () => fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2))
+  if (compatibility) {
+    assert.equal(o['--version'], OLD_RUNTIME.version)
+    const seed = { prior, seedSha: o['--seed-sha'], appSha: o['--sha'], home, webOutput, runner: proof, seedProof: read(path.join(webOutput, 'runner-proof.json')), release: read(path.join(webOutput, 'release.json')), completion: read(path.join(webOutput, 'privatecompletion.json')) }
+    qualification.validateRunnerProof(seed.seedProof); assertNativeCompatibilitySeed(seed)
+    assert.equal(qualification.qualificationStatus(prior), 'passed-web-native-missing')
+    qualification.validatePrivateCompletion(seed.completion, { home, ...OLD_RUNTIME })
+    const suffix = path.basename(output).match(/^hermes-native-(.+)$/)?.[1]
+    assert.ok(suffix, 'compat输出命名须hermes-native-NAME，对应同级hermes-native-build-NAME构建回执')
+    const binding = readNativeCompatibilityBinding({ root, app, sha: o['--sha'], buildReceipt: path.join(path.dirname(output), `hermes-native-build-${suffix}`, 'build-receipt.json') })
+    const appPin = assertNativeCompatibilityPins({ rust: fs.readFileSync(path.join(root, 'src-tauri/src/commands/hermes.rs'), 'utf8'), web: fs.readFileSync(path.join(root, 'scripts/dev-api.js'), 'utf8') })
+    Object.assign(report, { mode: COMPATIBILITY_MODE, seedSha: o['--seed-sha'], scope: 'new ClawPanel app (22.2 pin) / existing Hermes 0.21.5 runtime / native Rust IPC only; Windows Web compatibility not covered', compatibility: { seed, binding, appPin, runtimeChecks: [], blockedInstallerCommands: [], finalRuntimeHead: null, seedMemoryPreserved: false, seedHistoryPreserved: false } }); save()
+  }
   const before = qualification.hostSnapshot(proof)
   fs.writeFileSync(path.join(output, 'host-before.json'), JSON.stringify(before, null, 2))
   const env = qualification.isolationEnv({ home, temp: path.join(output, 'tmp'), realProfile: proof.actualProfile })
@@ -294,13 +394,37 @@ async function execute(o) {
   Object.assign(config, { ignoreRisk: true, openclawDir: panelDir, engineMode: 'hermes', enabledEngines: ['hermes'], engineSetupChoice: 'explicit' })
   fs.writeFileSync(panelPath, JSON.stringify(config))
   if (!fs.existsSync(path.join(panelDir, 'openclaw.json'))) fs.writeFileSync(path.join(panelDir, 'openclaw.json'), '{}')
-  const sources = Object.fromEntries(['src-tauri/src/commands/hermes.rs', 'src-tauri/src/lib.rs', 'src-tauri/Cargo.lock', 'package.json'].map(f => [f, hash(path.join(root, f))]))
+  const sources = compatibility ? report.compatibility.binding.sourceHashes : Object.fromEntries(['src-tauri/src/commands/hermes.rs', 'src-tauri/src/lib.rs', 'src-tauri/Cargo.lock', 'package.json'].map(f => [f, hash(path.join(root, f))]))
   const watchedIdentities = new Map(), ports = new Set(), activeListeners = new Map()
   let driver, provider, client, providerPort, driverPort, nativePort
   const nativePids = new Set()
   async function ipc(cmd, args, timeout) {
-    const value = await client.ipc(cmd, args, timeout)
-    report.ipc.push({ cmd, ok: true, at: new Date().toISOString() }); save(); return value
+    const receipt = { cmd, ok: false, at: new Date().toISOString() }; report.ipc.push(receipt)
+    try { const value = await client.ipc(cmd, args, timeout); receipt.ok = true; return value } finally { save() }
+  }
+  function runtimeHead() {
+    const r = spawnSync('git', ['--no-optional-locks', '-C', path.join(env.HERMES_HOME, 'hermes-agent'), 'rev-parse', 'HEAD'], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+    assert.equal(r.status, 0, r.stderr); assert.equal(r.stdout.trim(), OLD_RUNTIME.commit, '旧runtime source HEAD已变化/升级'); return r.stdout.trim()
+  }
+  async function compatibilityCheck(phase) {
+    const state = await ipc('check_hermes'), commit = runtimeHead()
+    assert.equal(state.installed, true); assert.equal(state.version, OLD_RUNTIME.version); assert.equal(nativePath(state.hermesHome), nativePath(env.HERMES_HOME))
+    report.compatibility.runtimeChecks.push({ phase, installed: state.installed, version: state.version, commit, hermesHome: state.hermesHome, at: new Date().toISOString() }); save()
+  }
+  const seedMemory = path.join(env.HERMES_HOME, 'memories/qualification.txt')
+  let seedMemoryHash
+  async function compatibilityHistory() {
+    const sessions = await ipc('hermes_sessions_list', { limit: 100 }), list = Array.isArray(sessions) ? sessions : sessions.sessions
+    assert.ok(Array.isArray(list) && list.length, '旧seed历史为空')
+    const missing = new Set(prior.browser.prompts.map(p => p.reply))
+    assert.ok([...missing].every(reply => typeof reply === 'string' && reply.length), '旧seed缺实际完整回复')
+    for (const s of list) {
+      const detail = JSON.stringify(await ipc('hermes_session_detail', { sessionId: s.id || s.session_id }))
+      for (const reply of missing) if (detail.includes(reply)) missing.delete(reply)
+      if (!missing.size) break
+    }
+    assert.equal(missing.size, 0, '新app操控后旧seed完整历史丢失'); report.compatibility.seedHistoryPreserved = true
+    assert.equal(hash(seedMemory), seedMemoryHash, '新app损坏旧seed记忆canary'); report.compatibility.seedMemoryPreserved = true; save()
   }
   function runtimeSnapshot() {
     // TCP实际owner与同次CIM身份绑定；仅输出私有HOME进程和所需端口，不枚举泄露全机命令行。
@@ -384,6 +508,7 @@ $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq '
     return result
   }
   try {
+    if (compatibility) { runtimeHead(); assert.equal(fs.readFileSync(seedMemory, 'utf8'), o['--seed-sha'], 'seed记忆canary不匹配'); seedMemoryHash = hash(seedMemory) }
     provider = await createNativeProvider({ report, save })
     await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve)); providerPort = provider.address().port
     driverPort = await freePort(); nativePort = await freePort()
@@ -392,7 +517,8 @@ $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq '
     fs.closeSync(log)
     let spawnError; driver.once('error', e => { spawnError = e })
     await until(async () => { if (spawnError) throw spawnError; return await reachable(driverPort) }, 30000)
-    client = new NativeWebDriver(`http://127.0.0.1:${driverPort}`); report.webdriver = await client.create(app)
+    client = new NativeWebDriver(`http://127.0.0.1:${driverPort}`, { compatibility }); report.webdriver = await client.create(app)
+    if (compatibility) report.compatibility.blockedInstallerCommands = client.blockedInstallerCommands
     const startedApps = applicationPids(); assert.ok(startedApps.some(p => p.ExecutablePath.toLowerCase() === app.toLowerCase()), '没有实际 ClawPanel.exe 进程')
     report.application.processes = startedApps
     for (const p of startedApps) nativePids.add(p.ProcessId)
@@ -400,6 +526,7 @@ $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq '
     assertNativePage(report.nativePage)
     const resolved = await ipc('get_openclaw_dir'); assertNativeConfigDir(resolved, panelDir)
     const status = await ipc('check_hermes'); assert.equal(status.installed, true); assert.equal(status.version, o['--version'])
+    if (compatibility) await compatibilityCheck('before-ui')
     const gatewayPort = await freePort(); ports.add(gatewayPort); report.gatewayPort = gatewayPort
     await ipc('hermes_env_set', { key: 'API_SERVER_HOST', value: '127.0.0.1' })
     await ipc('hermes_env_set', { key: 'API_SERVER_PORT', value: String(gatewayPort) })
@@ -448,9 +575,12 @@ $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq '
       assert.ok(item.prompts.every(p => JSON.stringify(detail).includes(`原生完整回复：${p.nonce}；模型：${model}。`)), 'native 停止后实际 CLI 历史缺完整回复')
       item.historyReadbackAfterStop = true
       await observe(item); await client.screenshot(path.join(output, `round-${round}.png`)); save()
+      if (compatibility) await compatibilityCheck(`after-round-${round}`)
     }
     for (const prompt of report.rounds.flatMap(x => x.prompts)) assert.equal(report.provider.filter(x => x.nonce === prompt.nonce && x.model === prompt.model && !x.title).length, 1, 'native 聊天请求缺失/重放')
     assert.ok(!report.providerError)
+    if (compatibility) { await compatibilityHistory(); await compatibilityCheck('after-ui') }
+    else {
     // Web 冷安装证明不代替 Rust 安装链：同 HOME 实际更新、保留数据卸载和重装。
     // 安装阶段只订阅真实 Tauri 事件；不修改产品命令、权限或时间上限。
     const listen = await client.command('POST', '/execute/async', {
@@ -495,6 +625,7 @@ $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq '
         item.finishedAt = new Date().toISOString(); save()
       }
     }
+    }
     await ipc('hermes_gateway_action', { action: 'start' })
     assertNativeHealth(await ipc('hermes_health_check'), o['--version']); captureListeners(gatewayPort)
     await stop()
@@ -517,6 +648,7 @@ $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq '
       sourceFinal: async () => {
         assert.deepEqual(Object.fromEntries(Object.keys(sources).map(f => [f, hash(path.join(root, f))])), sources, 'native源码发生漂移')
         assert.equal(hash(app), report.application.sha256)
+        if (compatibility) assert.equal(spawnSync('git', ['--no-optional-locks', '-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).stdout.trim(), o['--sha'])
       },
       nativeKill: async () => {
         // 仅清理实际EXE/私有WebView2，不按名称扫全机；失败不跳过后续核验。
@@ -535,6 +667,9 @@ $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq '
         await until(async () => (await Promise.all(allPorts.map(reachable))).every(v => !v), 30000)
         report.driverPortsClosed = true; report.allFinalPorts = allPorts
       },
+      compatibilityFinal: async () => {
+        if (compatibility) { report.compatibility.finalRuntimeHead = runtimeHead(); assert.equal(hash(seedMemory), seedMemoryHash, '最终旧seed记忆canary变化') }
+      },
       hostFinal: async () => {
         const after = qualification.hostSnapshot(proof); fs.writeFileSync(path.join(output, 'host-after.json'), JSON.stringify(after, null, 2)); qualification.assertHostUnchanged(before, after); report.hostUnchanged = true
       },
@@ -542,14 +677,14 @@ $listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq '
     })
     if (report.cleanupFailures.length) report.cleanupError = JSON.stringify(report.cleanupFailures)
     report.finishedAt = new Date().toISOString()
-    try { assertNativeComplete(report); report.status = 'passed-native-tauri' } catch (e) { report.status = 'failed'; report.gateError = String(e) }
+    try { if (compatibility) { report.status = COMPATIBILITY_STATUS; assertNativeCompatibilityComplete(report) } else { assertNativeComplete(report); report.status = 'passed-native-tauri' } } catch (e) { report.status = 'failed'; report.gateError = String(e) }
     save()
   }
   console.log(JSON.stringify({ status: report.status, sha: o['--sha'], rounds: report.rounds.length, output }))
-  return report.status === 'passed-native-tauri' ? 0 : 1
+  return report.status === (compatibility ? COMPATIBILITY_STATUS : 'passed-native-tauri') ? 0 : 1
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  try { const o = nativeArgs(process.argv.slice(2)); if (!o['--execute']) console.log(JSON.stringify(nativePlan())); else process.exitCode = await execute(o) }
+  try { const o = nativeArgs(process.argv.slice(2)); if (!o['--execute']) console.log(JSON.stringify(nativePlan(o))); else process.exitCode = await execute(o) }
   catch (e) { console.error(e.message); process.exitCode = 1 }
 }

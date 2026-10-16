@@ -206,6 +206,10 @@ function physical(file) {
   }
   return file
 }
+// 调用子进程前固定 checkout；后续命令 cwd 已切换到私有导出目录。
+export function resolveQualificationCheckout(file, cwd = process.cwd()) {
+  return physical(path.resolve(cwd, file))
+}
 function ps(code) {
   // Windows PowerShell 5.1 自行建立模块路径，不继承 PS7 的不兼容模块；仅改子环境副本。
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'))
@@ -341,7 +345,7 @@ async function execute(o) {
   const r = { schemaVersion: 1, status: 'failed', candidateSha: o['--sha'], expectedVersion: o['--version'], variant: o['--variant'], startedAt: new Date().toISOString(), commands: [], installerStarted: false, stages: STAGES.map(name => ({ name, status: 'missing' })), nativeTauri: { status: 'not-run', qualificationComplete: false }, limitations: ['仅手工一次性托管 Windows 的真实 Web 验收，不证明 native Tauri GUI', 'HOME 隔离不是 Windows HKCU 沙箱；因此本机/self-hosted 均在候选执行前拒绝', '不自动恢复宿主变更，不自动重试，不使用业务凭据或收费模型'] }
   const save = () => fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(r, null, 2))
   const write = (name, value) => fs.writeFileSync(path.join(output, name), JSON.stringify(value, null, 2))
-  let env, home, project, before, proof, web, provider, base, runtimePort, dashboardPort, browser, context, cli, python, release, lastSession, stopped = true, installCursor = 0
+  let env, home, project, checkout, before, proof, web, provider, base, runtimePort, dashboardPort, browser, context, cli, python, release, lastSession, stopped = true, installCursor = 0
   const runtimePids = new Set(), pendingCommands = new Set(), calls = [], providerHTTP = [], apiReceipts = []
   const npmCli = path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')
   async function run(program, args, { cwd = project, timeout = 120000 } = {}) {
@@ -438,7 +442,8 @@ async function execute(o) {
     r.toolingDependencies = Object.fromEntries(['scripts/test-hermes-windows-qualification.mjs', 'scripts/hermes-qualification-provider.mjs'].map(file => [file, hash(path.join(tooling, file))]))
     write('tooling-dependencies.json', { sha: proof.toolingSha, files: r.toolingDependencies })
     assert.ok(within(physical(process.env.RUNNER_TEMP), output), '输出不在本次 RUNNER_TEMP')
-    assert.ok(within(physical(process.env.GITHUB_WORKSPACE), physical(o['--root'])), '候选不在 checkout workspace')
+    checkout = resolveQualificationCheckout(o['--root'])
+    assert.ok(within(physical(process.env.GITHUB_WORKSPACE), checkout), '候选不在 checkout workspace')
     before = hostSnapshot(proof); write('host-before.json', before)
     home = path.join(output, 'h'); assert.ok(home.length <= 96, 'Windows 私有 HOME 路径过长'); fs.mkdirSync(home)
     env = isolationEnv({ home, temp: path.join(output, 't'), realProfile: proof.actualProfile })
@@ -448,13 +453,13 @@ async function execute(o) {
     write('isolation-proof.json', { fullEnvironmentSha256: digest(JSON.stringify(env)), credentialInheritance: false, privatePaths: Object.fromEntries(['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'HERMES_HOME', 'OPENCLAW_CONFIG_DIR'].map(k => [k, env[k]])), pathVariableCount: Object.keys(env).filter(k => k.toLowerCase() === 'path').length })
     project = path.join(output, 'source'); fs.mkdirSync(project)
     await stage('source-isolation', async () => {
-      assert.equal(await git(['-C', o['--root'], 'rev-parse', 'HEAD']), o['--sha'])
-      assert.equal(await git(['-C', o['--root'], 'status', '--porcelain', '--untracked-files=no']), '')
-      const source = {}, tree = (await git(['-C', o['--root'], 'ls-tree', '-r', '--full-tree', o['--sha']])).split('\n')
+      assert.equal(await git(['-C', checkout, 'rev-parse', 'HEAD']), o['--sha'])
+      assert.equal(await git(['-C', checkout, 'status', '--porcelain', '--untracked-files=no']), '')
+      const source = {}, tree = (await git(['-C', checkout, 'ls-tree', '-r', '--full-tree', o['--sha']])).split('\n')
       for (const line of tree) {
         const m = line.match(/^(100644|100755) blob ([a-f0-9]{40})\t(.+)$/); assert.ok(m, '拒绝 symlink/submodule/特殊 Git tree entry')
         const [, , oid, file] = m; assert.ok(within(project, path.resolve(project, file)))
-        const bytes = spawnSync('git', ['--no-optional-locks', '-C', o['--root'], 'show', `${o['--sha']}:${file}`], { env, windowsHide: true, timeout: 30000, maxBuffer: 128 * 1024 * 1024 })
+        const bytes = spawnSync('git', ['--no-optional-locks', '-C', checkout, 'show', `${o['--sha']}:${file}`], { env, windowsHide: true, timeout: 30000, maxBuffer: 128 * 1024 * 1024 })
         assert.equal(bytes.status, 0); assert.equal(crypto.createHash('sha1').update(`blob ${bytes.stdout.length}\0`).update(bytes.stdout).digest('hex'), oid)
         const target = path.join(project, file); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, bytes.stdout); source[file] = hash(target)
       }
@@ -476,7 +481,7 @@ async function execute(o) {
     runtimePort = await freePort(); dashboardPort = await freePort(); const webPort = await freePort(); assert.equal(new Set([runtimePort, dashboardPort, webPort]).size, 3)
     fs.writeFileSync(path.join(env.OPENCLAW_CONFIG_DIR, 'clawpanel.json'), JSON.stringify({ ignoreRisk: true, openclawDir: env.OPENCLAW_CONFIG_DIR, engineMode: 'hermes', enabledEngines: ['hermes'], engineSetupChoice: 'explicit' }))
     fs.writeFileSync(path.join(env.OPENCLAW_CONFIG_DIR, 'openclaw.json'), '{}\n')
-    r.environment = { home, hermesHome: env.HERMES_HOME, output, source: project, checkout: path.resolve(o['--root']), sourceSha: o['--sha'] }
+    r.environment = { home, hermesHome: env.HERMES_HOME, output, source: project, checkout, sourceSha: o['--sha'] }
     const audit = path.join(home, 'spawn-audit.mjs'); fs.writeFileSync(audit, spawnAuditSource(path.join(output, 'spawn-audit.jsonl')))
     web = spawn(process.execPath, ['--import', pathToFileURL(audit).href, path.join(project, 'scripts/serve.js'), '--host', '127.0.0.1', '--port', String(webPort)], { cwd: project, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     r.webPid = web.pid; r.webPort = webPort; web.stdout.on('data', d => fs.appendFileSync(path.join(output, 'serve.stdout.log'), d)); web.stderr.on('data', d => fs.appendFileSync(path.join(output, 'serve.stderr.log'), d)); web.on('exit', (code, signal) => { r.webExit = { code, signal, at: new Date().toISOString() }; save() })
