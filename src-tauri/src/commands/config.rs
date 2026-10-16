@@ -2593,6 +2593,8 @@ fn strip_ui_fields(mut val: Value) -> Value {
                         }
                     }
                 }
+                // 在递归 merge 后清理退役标记，保留不同 surface 与旧迁移语义。
+                super::agent::normalize_entries_ownership(agents_obj);
             }
         }
     }
@@ -8431,6 +8433,29 @@ mod write_openclaw_config_merge_tests {
     use super::write_verified_json_with_backup;
     use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn post_merge_owner_cleanup_preserves_surface_semantics() {
+        let config = json!({
+            "agents": {"ownership":"explicit", "defaults": {
+                "systemAgent":{"agentId":"beta"}, "sessionStore":{"agentId":"alpha"}
+            }, "entries": {"alpha":{"default":true,"isDefault":true,"tools":{"deny":["exec"]}},"beta":{}}},
+            "gateway":{"auth":{"mode":"token","token":"isolated-fixture-no-secret"}}
+        });
+        let cleaned = strip_ui_fields(config.clone());
+        assert_eq!(
+            cleaned["agents"]["entries"]["alpha"],
+            json!({"tools":{"deny":["exec"]}})
+        );
+        assert_eq!(cleaned["agents"]["defaults"], config["agents"]["defaults"]);
+        assert_eq!(cleaned["gateway"], config["gateway"]);
+        for legacy in [
+            json!({"agents":{"entries":{"alpha":{"default":true},"beta":{}}}}),
+            json!({"agents":{"list":[{"id":"alpha","default":true},{"id":"beta"}]}}),
+        ] {
+            assert_eq!(strip_ui_fields(legacy.clone()), legacy);
+        }
+    }
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         let suffix = std::time::SystemTime::now()

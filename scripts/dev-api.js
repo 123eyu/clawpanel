@@ -34,6 +34,7 @@ import {
   ensureMutableAgentConfig,
   findAgentConfig,
   listAgentConfigs,
+  normalizeCanonicalOwnership,
   removeAgentConfig,
   supportsAgentEntries,
 } from '../src/lib/openclaw-agent-roster.js'
@@ -1191,6 +1192,20 @@ function readVersionFromInstallation(cliPath) {
     }
   }
   return null
+}
+
+/** 微信状态复用已选 CLI 的真实 npm manifest；不执行 CLI、不猜全局最新版本。 */
+export function readWeixinHostVersion(cliPath = resolveOpenclawCliPath()) {
+  const installed = readVersionFromInstallation(cliPath)
+  if (installed) return installed
+  try {
+    const file = findOpenclawPackageJson(cliPath)
+    if (!file) return null
+    const pkg = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (!['openclaw', '@qingchencloud/openclaw-zh'].includes(pkg?.name)) return null
+    const version = pkg.version
+    return typeof version === 'string' && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version) ? version : null
+  } catch { return null }
 }
 
 function findOpenclawPackageJson(cliPath) {
@@ -3059,6 +3074,8 @@ export function stripUiFields(config) {
         delete agent.update_available
       }
     }
+    // 必须在递归 merge 之后处理，避免省略删除的退役标记被 existing 补回。
+    normalizeCanonicalOwnership(config.agents)
   }
   // 清理模型测试相关的临时字段
   const providers = config?.models?.providers
@@ -19760,7 +19777,7 @@ const handlers = {
       if (response.ok) latestVersion = (await response.json()).version || null
     } catch {}
     return { ...status, installedVersion, latestVersion, extensionDir: status.path,
-      ...buildWeixinCompatibilityStatus(readVersionFromInstallation(resolveOpenclawCliPath()), installedVersion) }
+      ...buildWeixinCompatibilityStatus(readWeixinHostVersion(), installedVersion) }
   },
   async diagnose_channel({ platform, accountId } = {}) {
     if (!platform || !String(platform).trim()) throw new Error('platform 不能为空')
