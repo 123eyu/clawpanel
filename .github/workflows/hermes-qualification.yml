@@ -159,7 +159,7 @@ jobs:
           docker build --file tooling/.github/maintenance/Runtime.Dockerfile --tag hermes-qualification-trusted tooling
           sha256sum tooling/.github/maintenance/Runtime.Dockerfile tooling/scripts/maintenance-runtime-smoke.mjs tooling/scripts/hermes-qualification-bootstrap.mjs tooling/scripts/hermes-qualification-browser.py > "$EVIDENCE/tooling-sha256.txt"
           python3 -m venv "$RUNNER_TEMP/hermes-browser-venv"
-          "$RUNNER_TEMP/hermes-browser-venv/bin/pip" install 'playwright==1.58.2'
+          "$RUNNER_TEMP/hermes-browser-venv/bin/pip" install 'playwright==1.58.0'
           "$RUNNER_TEMP/hermes-browser-venv/bin/python" -m playwright install chromium
       - name: 非 root fresh11 后原容器同 HOME 生产 Web（只发布 host loopback）
         run: |

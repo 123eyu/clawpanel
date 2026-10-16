@@ -261,3 +261,22 @@ test('publication 保留真实 symlink/junction 拒绝：输入或输出祖先�
     fs.rmSync(tmp, { recursive: true, force: true })
   }
 })
+
+test('runner admission 失败前落盘实际 proof 与逐条件 reason，诊断不放宽 guard', async () => {
+  const { runnerProofFailures } = await load(); assert.equal(typeof runnerProofFailures, 'function')
+  assert.deepEqual(runnerProofFailures(proof()), [])
+  const bad = { ...proof(), virtualMachine: false, registeredProfile: 'C:\\Users\\other', workflowSha: 'b'.repeat(40) }
+  assert.deepEqual(runnerProofFailures(bad).sort(), ['profile-registration', 'virtual-machine', 'workflow-sha-match'])
+  assert.ok(runnerProofFailures(bad).every(s => /^[a-z-]+$/.test(s)), '只记录静态原因名，不拼入实际环境或凭据')
+  const src = fs.readFileSync(script, 'utf8'), begin = src.indexOf('proof = actualRunnerProof()'), validate = src.indexOf('validateRunnerProof(proof)', begin)
+  assert.ok(begin >= 0 && validate > begin)
+  for (const name of ['runner-proof.json', 'runner-admission.json']) { const write = src.indexOf(`write('${name}'`, begin); assert.ok(write > begin && write < validate, `${name} 必须早于 validate`) }
+})
+
+test('Linux Python Chromium 固定实际发布的 playwright1.58.0，不混用 npm1.58.2', () => {
+  const w = YAML.parse(fs.readFileSync(path.join(root, '.github/workflows/hermes-qualification.yml'), 'utf8'))
+  const body = w.jobs['linux-long-ui'].steps.map(s => s.run || '').join('\n')
+  assert.match(body, /pip" install 'playwright==1\.58\.0'/)
+  assert.doesNotMatch(body, /playwright==1\.58\.2/)
+  assert.match(fs.readFileSync(script, 'utf8'), /playwright@1\.58\.2/, '保留已发布的 Windows npm 版本，不误改')
+})

@@ -48,15 +48,25 @@ export function matrixFromInputs(env) {
   return { include }
 }
 
+export function runnerProofFailures(p) {
+  // 与原有合取门禁逐项等价；原因只含静态条件名，不拼入环境值或凭据。
+  const checks = {
+    platform: p.platform === 'win32', architecture: p.arch === 'x64',
+    'runner-environment': p.runnerEnvironment === 'github-hosted', 'runner-os': p.runnerOS === 'Windows',
+    event: p.event === 'workflow_dispatch', 'main-ref': p.ref === 'refs/heads/main', repository: p.repository === 'qingchencloud/clawpanel',
+    'workflow-ref': p.workflowRef === 'qingchencloud/clawpanel/.github/workflows/hermes-qualification.yml@refs/heads/main',
+    'workflow-sha-format': exactSha(p.workflowSha), 'workflow-sha-match': p.workflowSha === p.toolingSha,
+    'run-id': /^\d+$/.test(p.runId || ''), 'run-attempt': /^\d+$/.test(p.attempt || ''),
+    'virtual-machine': p.virtualMachine === true, 'image-os': /^win\d+$/.test(p.imageOS || ''), 'image-version': !!p.imageVersion,
+    'user-name': p.userName?.toLowerCase() === 'runneradmin', 'sid-format': /^S-1-5-21-\d+-\d+-\d+-\d+$/.test(p.sid || ''),
+    'actual-profile': /^[a-z]:\\Users\\runneradmin$/i.test(p.actualProfile || ''), 'profile-registration': p.actualProfile?.toLowerCase() === p.registeredProfile?.toLowerCase(),
+  }
+  return Object.entries(checks).filter(([, passed]) => !passed).map(([name]) => name)
+}
+
 export function validateRunnerProof(p) {
-  const ok = p.platform === 'win32' && p.arch === 'x64' && p.runnerEnvironment === 'github-hosted' && p.runnerOS === 'Windows'
-    && p.event === 'workflow_dispatch' && p.ref === 'refs/heads/main' && p.repository === 'qingchencloud/clawpanel'
-    && p.workflowRef === 'qingchencloud/clawpanel/.github/workflows/hermes-qualification.yml@refs/heads/main'
-    && exactSha(p.workflowSha) && p.workflowSha === p.toolingSha && /^\d+$/.test(p.runId || '') && /^\d+$/.test(p.attempt || '')
-    && p.virtualMachine === true && /^win\d+$/.test(p.imageOS || '') && !!p.imageVersion
-    && p.userName?.toLowerCase() === 'runneradmin' && /^S-1-5-21-\d+-\d+-\d+-\d+$/.test(p.sid || '')
-    && /^[a-z]:\\Users\\runneradmin$/i.test(p.actualProfile || '') && p.actualProfile?.toLowerCase() === p.registeredProfile?.toLowerCase()
-  assert.ok(ok, 'Windows 资格门禁失败：仅可信 main 手工 GitHub-hosted VM + 真实 runneradmin SID/ProfileList；环境变量不是宿主隔离证明')
+  const failures = runnerProofFailures(p)
+  assert.equal(failures.length, 0, `Windows 资格门禁失败：仅可信 main 手工 GitHub-hosted VM + 真实 runneradmin SID/ProfileList；环境变量不是宿主隔离证明；failedConditions=${failures.join(',')}`)
 }
 
 export function isolationEnv({ home, temp, parent = process.env, realProfile = parent.USERPROFILE }) {
@@ -343,7 +353,10 @@ async function execute(o) {
     throw new Error('真实 CLI 历史没有完整本轮回复')
   }
   try {
-    proof = actualRunnerProof(); validateRunnerProof(proof); write('runner-proof.json', proof)
+    proof = actualRunnerProof(); write('runner-proof.json', proof)
+    r.runnerAdmission = { passed: false, failedConditions: runnerProofFailures(proof) }
+    r.runnerAdmission.passed = r.runnerAdmission.failedConditions.length === 0
+    write('runner-admission.json', r.runnerAdmission); save(); validateRunnerProof(proof)
     assert.ok(within(physical(process.env.RUNNER_TEMP), output), '输出不在本次 RUNNER_TEMP')
     assert.ok(within(physical(process.env.GITHUB_WORKSPACE), physical(o['--root'])), '候选不在 checkout workspace')
     before = hostSnapshot(proof); write('host-before.json', before)
