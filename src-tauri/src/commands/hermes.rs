@@ -1361,8 +1361,9 @@ fn run_at_path(program: &str, args: &[&str], path: &str) -> Result<String, Strin
 }
 
 fn hermes_version_at_path(path: &str) -> Result<String, String> {
-    run_at_path("hermes", &["version"], path)
-        .or_else(|_| run_at_path("hermes", &["--version"], path))
+    // 优先官方快速入口，避免状态轮询触发完整 CLI 启动。
+    run_at_path("hermes", &["--version"], path)
+        .or_else(|_| run_at_path("hermes", &["version"], path))
 }
 
 /// 解析 Python 版本号 "Python X.Y.Z" → (X, Y, Z)

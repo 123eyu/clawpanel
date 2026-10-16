@@ -1,0 +1,255 @@
+name: Manual Hermes Qualification
+
+# 先由维护者审查并注册到 main，再在 main 手工选择不可变导出 SHA。
+# 不复用/改写 Daily Maintenance，不自动 AI、PR、升级用户机器或发版。
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'baseline=0.21.5；candidate=0.22.2；两者必须各有精确导出 SHA'
+        type: choice
+        options: [baseline, candidate, both]
+        default: baseline
+      platform:
+        description: 'Windows 生产 Web / Linux fresh11 后两轮长 UI；均不代替 native Tauri'
+        type: choice
+        options: [windows, linux, both]
+        default: both
+      baseline_sha:
+        description: '旧版0.21.5导出的完整40位SHA；不改安装pin'
+        type: string
+        required: false
+      candidate_sha:
+        description: '新版0.22.2导出的完整40位SHA；不执行候选自己的验收器'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-qualification-manual
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'qingchencloud/clawpanel'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: tooling
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.16.0
+      - id: matrix
+        name: 在 checkout 候选之前验证完整 SHA（无 shell 输入插值）
+        env:
+          TARGET: ${{ inputs.target }}
+          BASELINE_SHA: ${{ inputs.baseline_sha }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          node tooling/scripts/test-hermes-windows-qualification.mjs --matrix > matrix.json
+          node --input-type=module -e 'import fs from "node:fs";const m=JSON.parse(fs.readFileSync("matrix.json","utf8"));fs.appendFileSync(process.env.GITHUB_OUTPUT,"matrix="+JSON.stringify(m)+"\n")'
+
+  qualify:
+    name: Windows ${{ matrix.variant }} — actual production Web (native missing)
+    needs: prepare
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'qingchencloud/clawpanel' && inputs.platform != 'linux'
+    runs-on: windows-2025
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: tooling
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: candidate
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.16.0
+      - name: 真实 VM/SID 资格后才建立短 HOME 并执行候选（无本机回退）
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ matrix.sha }}
+          EXPECTED_VERSION: ${{ matrix.version }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          node tooling/scripts/test-hermes-windows-qualification.mjs --execute --root candidate --sha "$env:CANDIDATE_SHA" --version "$env:EXPECTED_VERSION" --variant "$env:VARIANT" --output "$env:RUNNER_TEMP/hermes-qualification-$env:VARIANT"
+          exit $LASTEXITCODE
+      # Native 后续追加，同一 Web HOME 的入口已导出；本次不把 missing 写成实际通过。
+      - name: 仅生成脱敏公开证据（原始 HOME/env/cache 从不上传，trace ZIP 逐成员脱敏）
+        if: always()
+        shell: pwsh
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          node tooling/scripts/test-hermes-windows-qualification.mjs --publish-evidence "$env:RUNNER_TEMP/hermes-qualification-$env:VARIANT" --output "$env:RUNNER_TEMP/hermes-public-$env:VARIANT"
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: hermes-windows-${{ matrix.variant }}-${{ matrix.sha }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+          path: ${{ runner.temp }}/hermes-public-${{ matrix.variant }}/
+
+  linux-long-ui:
+    name: Linux ${{ matrix.variant }} — fresh11 + two warm Send8/210s UI rounds
+    needs: prepare
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'qingchencloud/clawpanel' && inputs.platform != 'windows'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      CANDIDATE_SHA: ${{ matrix.sha }}
+      EXPECTED_VERSION: ${{ matrix.version }}
+      VARIANT: ${{ matrix.variant }}
+      EVIDENCE: ${{ runner.temp }}/hermes-qualification-${{ matrix.variant }}
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/hermes-browser-cache
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: tooling
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: candidate
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.16.0
+      - name: 原可信 Runtime.Dockerfile 与私有 host Chromium
+        run: |
+          set -euo pipefail
+          test ! -e "$EVIDENCE"
+          mkdir -p "$EVIDENCE"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git -C candidate status --porcelain --untracked-files=no)"
+          python3 - <<'PY'
+          import os,pathlib,subprocess,hashlib,json
+          root=pathlib.Path('candidate');sha=os.environ['CANDIDATE_SHA'];files={}
+          for name in subprocess.check_output(['git','-C',str(root),'ls-tree','-r','--name-only',sha]).decode().splitlines():
+            blob=subprocess.check_output(['git','-C',str(root),'show',sha+':'+name]);assert (root/name).is_file() and not (root/name).is_symlink() and (root/name).read_bytes()==blob,name
+            files[name]=hashlib.sha256(blob).hexdigest()
+          pathlib.Path(os.environ['EVIDENCE'],'source-sha256.json').write_text(json.dumps({'sha':sha,'files':files},indent=2))
+          PY
+          docker build --file tooling/.github/maintenance/Runtime.Dockerfile --tag hermes-qualification-trusted tooling
+          sha256sum tooling/.github/maintenance/Runtime.Dockerfile tooling/scripts/maintenance-runtime-smoke.mjs tooling/scripts/hermes-qualification-bootstrap.mjs tooling/scripts/hermes-qualification-browser.py > "$EVIDENCE/tooling-sha256.txt"
+          python3 -m venv "$RUNNER_TEMP/hermes-browser-venv"
+          "$RUNNER_TEMP/hermes-browser-venv/bin/pip" install 'playwright==1.58.2'
+          "$RUNNER_TEMP/hermes-browser-venv/bin/python" -m playwright install chromium
+      - name: 非 root fresh11 后原容器同 HOME 生产 Web（只发布 host loopback）
+        run: |
+          set -euo pipefail
+          cid=$(docker run -d --init --user "$(id -u):$(id -g)" --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=512 --memory=4g \
+            --label "clawpanel.hermes.qualification.run=$GITHUB_RUN_ID" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/tooling,dst=/tooling,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/candidate,dst=/candidate" \
+            --mount "type=bind,src=$EVIDENCE,dst=/evidence" \
+            --publish 127.0.0.1::1420 --env HOME=/tmp/hermes-bootstrap --env CI=1 --env MAINTENANCE_ISOLATED_RUNTIME=1 \
+            --env "QUALIFICATION_CANDIDATE_SHA=$CANDIDATE_SHA" --env "QUALIFICATION_EXPECTED_VERSION=$EXPECTED_VERSION" \
+            hermes-qualification-trusted bash -euo pipefail -c '
+              test ! -w /tooling/scripts/maintenance-runtime-smoke.mjs
+              test ! -w /tooling/scripts/hermes-qualification-bootstrap.mjs
+              mkdir -p "$HOME"
+              npm ci
+              npm run build
+              node /tooling/scripts/maintenance-runtime-smoke.mjs --root /candidate --engine hermes --output /tmp/runtime
+              exec node /tooling/scripts/hermes-qualification-bootstrap.mjs --root /candidate --runtime-output /tmp/runtime --output /evidence/server --host 0.0.0.0 --port 1420
+            ')
+          printf '%s' "$cid" > "$EVIDENCE/container-id.txt"
+          docker inspect "$cid" > "$EVIDENCE/container-before.json"
+          port=$(docker port "$cid" 1420/tcp | sed -n 's/^127\.0\.0\.1://p')
+          test -n "$port"
+          printf '%s' "$port" > "$EVIDENCE/host-port.txt"
+          ready=0
+          for tick in $(seq 1 1800); do
+            if test "$(docker inspect -f '{{.State.Running}}' "$cid")" != true; then docker logs "$cid"; exit 1; fi
+            if test -f "$EVIDENCE/server/ready.json" && curl --fail --silent "http://127.0.0.1:$port/__api/health" > /dev/null; then ready=1; break; fi
+            sleep 1
+          done
+          test "$ready" = 1
+          docker cp "$cid:/tmp/runtime" "$EVIDENCE/runtime"
+          python3 - <<'PY'
+          import os,json,pathlib
+          b=pathlib.Path(os.environ['EVIDENCE']);r=json.loads((b/'runtime/report.json').read_text());assert r['status']=='passed' and len(r['cases'])==11 and all(c['status']=='passed' for c in r['cases']);assert r['versions']['hermes']==os.environ['EXPECTED_VERSION'];assert r['environment']['home']=='/tmp/runtime/home'
+          PY
+      - name: 两轮真实 host headless Chromium，不重新安装（每轮 Send8 + hold 210）
+        run: |
+          set -euo pipefail
+          port=$(cat "$EVIDENCE/host-port.txt")
+          for round in 1 2; do
+            "$RUNNER_TEMP/hermes-browser-venv/bin/python" tooling/scripts/hermes-qualification-browser.py --base-url "http://127.0.0.1:$port" --output "$EVIDENCE/browser-round$round" --hold 210
+          done
+      - name: 生产 STOP/PID/端口与原始日志（失败也保留）
+        if: always()
+        run: |
+          set -euo pipefail
+          test -f "$EVIDENCE/container-id.txt"
+          cid=$(cat "$EVIDENCE/container-id.txt")
+          test "$(docker inspect -f '{{index .Config.Labels "clawpanel.hermes.qualification.run"}}' "$cid")" = "$GITHUB_RUN_ID"
+          if test "$(docker inspect -f '{{.State.Running}}' "$cid")" = true; then docker kill --signal=TERM "$cid"; fi
+          if ! timeout 60 docker wait "$cid" > "$EVIDENCE/container-exit.txt"; then
+            docker inspect "$cid" > "$EVIDENCE/container-stop-timeout.json"
+            docker logs --timestamps "$cid" > "$EVIDENCE/container.log" 2>&1
+            docker cp "$cid:/tmp/runtime" "$EVIDENCE/runtime-at-timeout" || true
+            exit 1
+          fi
+          docker inspect "$cid" > "$EVIDENCE/container-after.json"
+          docker logs --timestamps "$cid" > "$EVIDENCE/container.log" 2>&1
+          docker cp "$cid:/tmp/runtime" "$EVIDENCE/runtime-final"
+          test "$(cat "$EVIDENCE/container-exit.txt")" = 0
+          port=$(cat "$EVIDENCE/host-port.txt")
+          HOST_PORT="$port" python3 - <<'PY'
+          import os,socket
+          s=socket.socket();s.settimeout(2)
+          try:assert s.connect_ex(('127.0.0.1',int(os.environ['HOST_PORT'])))!=0,'published TCP port still open'
+          finally:s.close()
+          PY
+          printf 'closed\n' > "$EVIDENCE/host-port-after.txt"
+          node tooling/scripts/test-hermes-windows-qualification.mjs --verify-linux-evidence "$EVIDENCE" --sha "$CANDIDATE_SHA" --version "$EXPECTED_VERSION" > "$EVIDENCE/qualification-result.json"
+          python3 - <<'PY'
+          import os,json,pathlib,hashlib
+          b=pathlib.Path(os.environ['EVIDENCE']);r=json.loads((b/'source-sha256.json').read_text());root=pathlib.Path('candidate')
+          for name,h in r['files'].items():assert hashlib.sha256((root/name).read_bytes()).hexdigest()==h,name
+          PY
+      - name: 仅生成脱敏公开证据（排除所有 runtime HOME/temp/cache）
+        if: always()
+        run: |
+          node tooling/scripts/test-hermes-windows-qualification.mjs --publish-evidence "$EVIDENCE" --output "$RUNNER_TEMP/hermes-public-$VARIANT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: hermes-linux-long-ui-${{ matrix.variant }}-${{ matrix.sha }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+          path: ${{ runner.temp }}/hermes-public-${{ matrix.variant }}/
+      - name: 仅删除本 job 已核验 label 的容器（先留证据）
+        if: always()
+        run: |
+          if test -f "$EVIDENCE/container-id.txt"; then
+            cid=$(cat "$EVIDENCE/container-id.txt")
+            test "$(docker inspect -f '{{index .Config.Labels "clawpanel.hermes.qualification.run"}}' "$cid")" = "$GITHUB_RUN_ID"
+            docker rm -f "$cid"
+          fi

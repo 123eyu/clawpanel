@@ -73,6 +73,14 @@ App 只需要 Contents / Pull requests 写入权限及必要的元数据读取�
 
 ## 本地命令
 
+### Hermes 独立资格验收
+
+`hermes-qualification.yml` 是手工触发、只读的补充验收，不改变每日控制器的 AI/PR/自动发布开关。仅 canonical 仓库的 `main` 执行可信工具，输入必须是完整候选 SHA。Windows 安装仅在 GitHub-hosted 一次性 VM 的真实 runneradmin SID/ProfileList 核验后运行，拒绝本机及 self-hosted；隔离 HOME 不被当作 HKCU 沙箱。记录注册表值与类型、shell、全局 launcher 的前后快照，不自动恢复改动掩盖失败。
+
+Linux 使用原可信 Runtime.Dockerfile、非 root、只读 tooling、无 Docker socket 的容器。实际 fresh11 通过后在原容器同 HOME 启动生产 Web，运行两轮真实 headless Chromium，每轮完整 Send8、210 秒和 42 次健康采样；最后调用生产 STOP 并核验 PID/端口。没有实际运行、缺证据或旧报告均失败。Windows Web 生命周期与原生 Tauri 分开记录；`test-hermes-tauri-qualification.mjs` 使用真实 WebDriver/WebView2/Rust IPC，尚未执行时保持 native 缺口，不能由布尔值回执补绿。
+
+原始证据保留在一次性 runner，公开 artifact 仅包含另外生成的脱敏副本；不上传 HOME、dotenv、运行时、缓存或真实凭据，trace ZIP 逐成员脱敏。资格验收本身不提交、不升级用户机器、不打 tag。
+
 在仓库根目录执行（不会改动真实运行时）：
 
 ```powershell

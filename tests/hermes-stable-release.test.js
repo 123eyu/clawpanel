@@ -54,8 +54,8 @@ test('Hermes version detection supports the 0.20.5 --version-only CLI', () => {
   const webSource = readSource('scripts/dev-api.js')
   const tauriSource = readSource('src-tauri/src/commands/hermes.rs')
 
-  assert.match(webSource, /function runHermesVersionSilent\(\)[^]*?\['version'\][^]*?\['--version'\]/)
-  assert.match(tauriSource, /fn hermes_version_at_path\(path: &str\)[^]*?&\["version"\][^]*?&\["--version"\]/)
+  assert.match(webSource, /function runHermesVersionSilent\(\)[^]*?\['--version'\][^]*?\['version'\]/)
+  assert.match(tauriSource, /fn hermes_version_at_path\(path: &str\)[^]*?&\["--version"\][^]*?&\["version"\]/)
   assert.match(webSource, /const ver = runHermesVersionSilent\(\)/)
   assert.match(tauriSource, /match hermes_version_at_path\(&enhanced\)/)
 })

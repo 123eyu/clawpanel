@@ -449,8 +449,9 @@ function runHermesSilent(program, args) {
 }
 
 function runHermesVersionSilent() {
-  const legacy = runHermesSilent('hermes', ['version'])
-  return legacy.ok ? legacy : runHermesSilent('hermes', ['--version'])
+  // 官方快速入口在完整 CLI 启动前返回；仅旧内核不支持时回退子命令。
+  const modern = runHermesSilent('hermes', ['--version'])
+  return modern.ok ? modern : runHermesSilent('hermes', ['version'])
 }
 
 function sanitizeHermesInstallOutput(text = '') {
