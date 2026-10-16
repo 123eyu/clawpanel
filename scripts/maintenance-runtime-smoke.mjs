@@ -11,6 +11,19 @@ import { spawn } from 'node:child_process'
 import { isManagedRenamedPiProcess } from './maintenance-pi-process.mjs'
 import { OPENCLAW_PROTOCOL_RANGE, buildDeviceAuthPayloadV3, resolveConnectSignedAt } from '../src/lib/openclaw-gateway-compat.js'
 const toolingRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+function collectCandidateSourceHashes(project) {
+  const files = ['scripts/serve.js', 'scripts/dev-api.js', 'scripts/pi-models.js', 'scripts/opencode.js', 'scripts/opencode-proxy.js', 'scripts/deepseek-harness.js', 'scripts/deepseek-harness-auth.js', 'scripts/deepseek-harness-proxy.js', 'src/lib/opencode-storage-bridge.js', 'src/lib/openclaw-gateway-compat.js', 'src/lib/tauri-api.js', 'src/engines/opencode/pages/workspace.js', 'src/engines/opencode/pages/dashboard.js', 'src/engines/hermes/pages/chat.js', 'package.json', 'package-lock.json', 'openclaw-version-policy.json', 'Dockerfile', '.github/maintenance/Runtime.Dockerfile']
+  // 新 PM 是运行依赖，存在时必须进入快照；旧分支没有该文件时仍保留原19项。
+  for (const optional of ['scripts/hermes-pm-runtime.js']) {
+    try { fs.lstatSync(path.join(project, optional)); files.push(optional) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  }
+  return Object.fromEntries(files.map(file => {
+    const absolute = path.join(project, file), stat = fs.lstatSync(absolute)
+    assert.ok(stat.isFile() && !stat.isSymbolicLink(), '源码必须为普通文件，不接受链接: ' + file)
+    return [file, crypto.createHash('sha256').update(fs.readFileSync(absolute)).digest('hex')]
+  }))
+}
 const engines = ['pi', 'opencode', 'deepseek-harness', 'hermes', 'openclaw', 'openclaw-zh', 'weixin', 'deepseek-harness-preview']
 const argv = process.argv.slice(2)
 if (argv.includes('--help')) {
@@ -145,7 +158,7 @@ function validateCandidate() {
   report.versions = { panel: pkg.version, pi: PI_PACKAGE_VERSION, opencode: OPENCODE_PACKAGE_VERSION, dsh: DSH_PACKAGE_VERSION, openclaw: policy.default.official.recommended, 'openclaw-zh': policy.default.chinese.recommended }
   report.environment.verifierSha256 = crypto.createHash('sha256').update(fs.readFileSync(fileURLToPath(import.meta.url))).digest('hex')
   report.environment.verifierDependencyHashes = Object.fromEntries(['scripts/maintenance-pi-process.mjs', 'src/lib/openclaw-gateway-compat.js'].map(file => [file, crypto.createHash('sha256').update(fs.readFileSync(path.join(toolingRoot, file))).digest('hex')]))
-  report.environment.candidateSourceHashes = Object.fromEntries(['scripts/serve.js', 'scripts/dev-api.js', 'scripts/pi-models.js', 'scripts/opencode.js', 'scripts/opencode-proxy.js', 'scripts/deepseek-harness.js', 'scripts/deepseek-harness-auth.js', 'scripts/deepseek-harness-proxy.js', 'src/lib/opencode-storage-bridge.js', 'src/lib/openclaw-gateway-compat.js', 'src/lib/tauri-api.js', 'src/engines/opencode/pages/workspace.js', 'src/engines/opencode/pages/dashboard.js', 'src/engines/hermes/pages/chat.js', 'package.json', 'package-lock.json', 'openclaw-version-policy.json', 'Dockerfile', '.github/maintenance/Runtime.Dockerfile'].map(file => [file, crypto.createHash('sha256').update(fs.readFileSync(path.join(project, file))).digest('hex')]))
+  report.environment.candidateSourceHashes = collectCandidateSourceHashes(project)
   return { packageName: pkg.name, versions: report.versions, candidateRoot: project, verifier: fileURLToPath(import.meta.url) }
 }
 function requireInstallContainer() {
