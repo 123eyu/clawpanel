@@ -848,7 +848,16 @@ async function execute(o) {
       stopped = false; await api('hermes_gateway_action', { action: 'start' }); await api('hermes_health_check'); await api('hermes_capabilities'); await api('hermes_gateway_action', { action: 'status' })
       if (diagnostic) { r.diagnostic.gatewayReadyWithinBudget = true; await capturePids(); return { scope: r.diagnostic.scope, gatewayReadyWithinBudget: true } }
       const dash = await api('hermes_dashboard_start'); assert.equal(dash.started, true); assert.equal((await api('hermes_dashboard_probe')).running, true); await capturePids()
-      await run(process.execPath, [npmCli, 'install', '--prefix', path.join(home, 'browser-tools'), '--no-save', '--ignore-scripts', '--package-lock=false', 'playwright@1.58.2'], { timeout: 600000 })
+      // 官方40747修复Node24.16与旧zip stream的死锁；固定测试工具版本，不降Node或扩安装预算。
+      await run(process.execPath, [npmCli, 'install', '--prefix', path.join(home, 'browser-tools'), '--no-save', '--ignore-scripts', '--package-lock=false', 'playwright@1.60.0'], { timeout: 600000 })
+      const browserModules = path.join(home, 'browser-tools/node_modules')
+      r.browserTooling = {
+        playwrightVersion: JSON.parse(fs.readFileSync(path.join(browserModules, 'playwright/package.json'), 'utf8')).version,
+        coreVersion: JSON.parse(fs.readFileSync(path.join(browserModules, 'playwright-core/package.json'), 'utf8')).version,
+        browserManifestSha256: digest(fs.readFileSync(path.join(browserModules, 'playwright-core/browsers.json'))),
+      }
+      assert.equal(r.browserTooling.playwrightVersion, '1.60.0'); assert.equal(r.browserTooling.coreVersion, '1.60.0')
+      write('browser-tooling.json', r.browserTooling); save()
       // 本验收只用默认headless shell；不再下载未使用的headed Chrome，原600秒和真实启动/长UI门禁不变。
       await run(process.execPath, [path.join(home, 'browser-tools/node_modules/playwright/cli.js'), 'install', '--only-shell', 'chromium'], { timeout: 600000, browserDiagnostics: true })
       const { chromium } = await import(pathToFileURL(path.join(home, 'browser-tools/node_modules/playwright/index.mjs')))
