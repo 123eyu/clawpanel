@@ -3368,7 +3368,12 @@ export function rawWsConnect(host, port, wsPath) {
       'Connection': 'Upgrade', 'Upgrade': 'websocket', 'Sec-WebSocket-Version': '13',
       'Sec-WebSocket-Key': key, 'Origin': 'http://localhost',
     } })
-    req.on('upgrade', (_, socket) => ok(socket))
+    req.on('upgrade', (_, socket, head) => {
+      // HTTP 101 与首个 WS 帧可能同包；等读取器挂好监听后再消费，避免丢失 challenge。
+      socket.pause()
+      if (head?.length) socket.unshift(head)
+      ok(socket)
+    })
     req.on('response', (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => no(new Error(`HTTP ${res.statusCode}`))) })
     req.on('error', no)
     req.setTimeout(5000, () => { req.destroy(); no(new Error('ws connect timeout')) })
@@ -3393,19 +3398,50 @@ export function wsReadFrame(socket, timeout = 8000) {
     }
     const t = setTimeout(finish(no), timeout, new Error('ws read timeout'))
     let buf = Buffer.alloc(0)
+    const fail = error => { finish(no)(error); socket.destroy() }
     const onData = (chunk) => {
-      buf = Buffer.concat([buf, chunk]); if (buf.length < 2) return
-      let len = buf[1] & 0x7f, off = 2
-      if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); off = 4 }
-      else if (len === 127) { if (buf.length < 10) return; len = Number(buf.readBigUInt64BE(2)); off = 10 }
-      if (buf.length < off + len) return
-      finish(ok)(buf.slice(off, off + len).toString('utf8'))
+      buf = Buffer.concat([buf, chunk])
+      while (buf.length >= 2) {
+        const opcode = buf[0] & 0x0f
+        let len = buf[1] & 0x7f, off = 2
+        if (buf[1] & 0x80) return fail(new Error('WebSocket 服务端首帧错误地使用掩码'))
+        if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); off = 4 }
+        else if (len === 127) { if (buf.length < 10) return; len = Number(buf.readBigUInt64BE(2)); off = 10 }
+        if (!Number.isSafeInteger(len)) return fail(new Error('WebSocket 首帧长度不合法'))
+        if (opcode >= 8 && (!(buf[0] & 0x80) || len > 125)) return fail(new Error('WebSocket 控制帧格式错误'))
+        if (buf.length < off + len) return
+        const payload = buf.subarray(off, off + len)
+        buf = buf.subarray(off + len)
+        if (opcode === 8) {
+          if (payload.length === 1) return fail(new Error('WebSocket 关闭帧格式错误'))
+          const closeCode = payload.length >= 2 ? payload.readUInt16BE(0) : null
+          const reason = payload.length > 2 ? payload.subarray(2).toString('utf8') : ''
+          const error = new Error(`ws closed${closeCode === null ? '' : ` (${closeCode})`}${reason ? ': ' + reason : ''}`)
+          error.closeCode = closeCode
+          return fail(error)
+        }
+        if (opcode === 9) {
+          const mask = crypto.randomBytes(4)
+          const body = Buffer.from(payload.map((byte, i) => byte ^ mask[i % 4]))
+          try { socket.write(Buffer.concat([Buffer.from([0x8a, 0x80 | payload.length]), mask, body])) } catch (error) { return fail(error) }
+          continue
+        }
+        if (opcode === 10) continue
+        if (opcode !== 1) return fail(new Error(`WebSocket 非文本首帧（opcode=${opcode}）`))
+        // 下一条消息留给后续读取器，避免同一 TCP 包中的后续帧被静默丢弃。
+        socket.pause()
+        if (buf.length) socket.unshift(buf)
+        finish(ok)(payload.toString('utf8'))
+        return
+      }
     }
     const onError = finish(no)
-    const onClose = finish(no)
+    const onClose = () => finish(no)(new Error('ws closed'))
     socket.on('data', onData)
     socket.on('error', onError)
-    socket.on('close', () => onClose(new Error('ws closed')))
+    socket.on('close', onClose)
+    if (socket.destroyed) onClose()
+    else socket.resume()
   })
 }
 
@@ -3446,6 +3482,7 @@ export function wsReadLoop(socket, onMessage, timeoutMs = DOCKER_TASK_TIMEOUT_MS
   })
   socket.on('error', () => { done = true; clearTimeout(timer) })
   socket.on('close', () => { done = true; clearTimeout(timer) })
+  socket.resume()
   return cancel
 }
 
