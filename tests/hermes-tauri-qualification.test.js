@@ -347,20 +347,58 @@ test('native两个PS5 JSON观察helper都在CIM读取前固定Console UTF8', () 
   for (const { name, prefix, body } of nativePsEncodingPrefixes()) assert.ok(prefix && body.indexOf(prefix) < body.indexOf('Get-CimInstance'), `${name}缺失Console UTF8，长cmdline弯引号会best-fit破坏JSON`)
 })
 
+test('PS5常量探针必须先确认进程成功和同源schema，启动超时不能冒充预期JSON错误', () => {
+  const payload = 'x'.repeat(20500) + '中文“quoted”'
+  const frame = { schemaVersion: 1, source: 'native-helper-encoding-fixture-v1', powershellMajor: 5, positiveCodePages: [65001, 65001], legacyCodePage: 437, helperModes: ['runtimeSnapshot', 'applicationPids'], payloadChars: payload.length }
+  const wire = (header, value = payload) => ['{"commandLine":"中文"quoted""}', JSON.stringify({ commandLine: value }), JSON.stringify({ commandLine: value }), JSON.stringify(header)].join('\r\n') + '\r\n'
+  const good = { status: 0, signal: null, stdout: wire(frame), stderr: '' }
+  assert.equal(decodeNativeEncodingProbe(good).positive[0].commandLine, payload)
+  for (const bad of [
+    { ...good, status: null, signal: 'SIGTERM', error: { code: 'ETIMEDOUT' } },
+    { ...good, status: 1 }, { ...good, stdout: 'not-json' },
+    ...[x => { x.source = 'other-fixture' }, x => { x.schemaVersion = 0 }, x => { x.positiveCodePages[0] = 437 }, x => { x.powershellMajor = 7 }, x => { x.helperModes.pop() }, x => { delete x.payloadChars }].map(mutate => { const x = structuredClone(frame); mutate(x); return { ...good, stdout: wire(x) } }),
+    { ...good, stdout: wire(frame, null) },
+  ]) assert.throws(() => decodeNativeEncodingProbe(bad), error => error.code === 'ERR_ASSERTION' && !(error instanceof SyntaxError))
+})
+
+function decodeNativeEncodingProbe(result) {
+  assert.ok(result?.status === 0 && !result.signal && !result.error, `fixture PS5 process failed: status=${result?.status}; signal=${result?.signal}; code=${result?.error?.code || 'none'}`)
+  const lines = String(result.stdout).replace(/^\uFEFF/, '').trimEnd().split(/\r?\n/)
+  assert.equal(lines.length, 4, 'fixture四帧不完整')
+  const parse = value => { try { return JSON.parse(value) } catch { assert.fail('fixture envelope/UTF8 JSON无效，不能冒充预期legacy语法错误') } }
+  const header = parse(lines[3])
+  assert.equal(header.schemaVersion, 1); assert.equal(header.source, 'native-helper-encoding-fixture-v1'); assert.equal(header.powershellMajor, 5)
+  assert.equal(header.legacyCodePage, 437); assert.deepEqual(header.positiveCodePages, [65001, 65001]); assert.deepEqual(header.helperModes, ['runtimeSnapshot', 'applicationPids'])
+  assert.ok(Number.isInteger(header.payloadChars) && header.payloadChars > 20000)
+  const positive = [parse(lines[1]), parse(lines[2])]
+  for (const row of positive) { assert.deepEqual(Object.keys(row), ['commandLine']); assert.equal(typeof row.commandLine, 'string'); assert.equal(row.commandLine.length, header.payloadChars) }
+  return { header, legacyJson: lines[0], positive }
+}
+
 test('PS5只读常量长JSON复现OEM best-fit quote并验证两个native前缀，不查询宿主CIM/任务', { skip: process.platform !== 'win32' }, () => {
-  // 只序列化本测试常量；绝不执行CIM/任务查询或真实命令行，不设置宿主chcp。
-  const value = 'x'.repeat(24000) + '中文“quoted”-‘single’-' + 'y'.repeat(3000)
-  const data = Buffer.from('中文“quoted”-‘single’-').toString('base64')
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => ['systemroot', 'windir', 'path', 'temp', 'tmp', 'comspec'].includes(k.toLowerCase())))
-  const run = prefix => {
-    const code = `[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(437);${prefix};$v=('x'*24000)+[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${data}'))+('y'*3000);[pscustomobject]@{commandLine=$v}|ConvertTo-Json -Compress`
-    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { env, encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 })
-    assert.equal(result.status, 0, 'fixture PS5常量序列化失败'); return result.stdout.replace(/^\uFEFF/, '').trim()
-  }
-  assert.throws(() => JSON.parse(run('')), SyntaxError, 'CP437弯引号best-fit必须复现JSON破坏，而非截断')
-  for (const { name, prefix } of nativePsEncodingPrefixes()) {
-    assert.ok(prefix, `${name}未提供实际UTF8前缀`)
-    assert.equal(JSON.parse(run(prefix)).commandLine, value, `${name}长JSON Unicode未完整保留`)
+  // 单个子进程、无cmdlet/autoload；仅已知不含ASCII引号/反斜线/换行的常量才手工拼JSON。
+  // 真实CIM+ConvertTo-Json由独立process-observation覆盖；本fixture仍用15s，不修改任何产品预算。
+  const token = '中文“quoted”-‘single’-', value = 'x'.repeat(20500) + token
+  assert.doesNotMatch(value, /["\\\r\n]/)
+  const data = Buffer.from(token).toString('base64'), modes = nativePsEncodingPrefixes()
+  for (const { name, prefix } of modes) assert.ok(prefix, `${name}未提供实际UTF8前缀`)
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'))
+  const code = `$ErrorActionPreference='Stop';$v=('x'*20500)+[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${data}'));$j='{"commandLine":"'+$v+'"}';
+[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(437);$legacy=[Console]::OutputEncoding.CodePage;[Console]::WriteLine($j);
+${modes[0].prefix};$cp1=[Console]::OutputEncoding.CodePage;[Console]::WriteLine($j);
+${modes[1].prefix};$cp2=[Console]::OutputEncoding.CodePage;[Console]::WriteLine($j);
+$h='{"schemaVersion":1,"source":"native-helper-encoding-fixture-v1","powershellMajor":'+$PSVersionTable.PSVersion.Major+',"legacyCodePage":'+$legacy+',"positiveCodePages":['+$cp1+','+$cp2+'],"helperModes":["runtimeSnapshot","applicationPids"],"payloadChars":'+$v.Length+'}';[Console]::WriteLine($h);`
+  const encoded = Buffer.from(code, 'utf16le').toString('base64'), started = performance.now()
+  assert.ok(encoded.length < 32767, 'fixture命令行必须短于Windows限制')
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { env, encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 })
+  const elapsedMs = performance.now() - started
+  const decoded = decodeNativeEncodingProbe(result)
+  assert.throws(() => JSON.parse(decoded.legacyJson), SyntaxError, '实际CP437坏JSON必须仍被拒绝')
+  for (const [i, { name }] of modes.entries()) assert.equal(decoded.positive[i].commandLine, value, `${name}长JSON Unicode未完整保留`)
+  if (process.env.HERMES_NATIVE_ENCODING_TEST_EVIDENCE) {
+    const directory = process.env.HERMES_NATIVE_ENCODING_TEST_EVIDENCE; fs.mkdirSync(directory, { recursive: true })
+    fs.writeFileSync(path.join(directory, 'native-encoding-probe.ps1'), code)
+    fs.writeFileSync(path.join(directory, 'native-encoding-probe.json'), JSON.stringify({ scope: 'local harmless PS5 fixture, not product runtime', header: decoded.header, spawnCalls: 1, timeoutMs: 15000, encodedChars: encoded.length, elapsedMs, status: result.status, signal: result.signal, errorCode: result.error?.code || null, environmentPolicy: 'parent-copy-without-PSModulePath', stdoutSha256: crypto.createHash('sha256').update(result.stdout).digest('hex'), positiveUnicodeRoundtrip: true, cp437SyntaxErrorConfirmed: true }, null, 2))
   }
 })
 

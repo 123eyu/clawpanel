@@ -9,8 +9,8 @@ import test from 'node:test'
 const load = () => import('../scripts/hermes-qualification-profile-collision.mjs')
 const sha = x => crypto.createHash('sha256').update(x).digest('hex')
 const pin = 'd923a5eb487a17c0a68801bba9ef0f56c81040a8'
-function fixture(t, fault, version = '0.22.2') {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-collision-owned-'))
+function fixture(t, fault, version = '0.22.2', tempBase = os.tmpdir()) {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(tempBase), 'hermes-collision-owned-'))
   const home = path.join(root, 'h'), output = path.join(root, 'output')
   fs.mkdirSync(path.join(home, '.hermes/hermes-agent'), { recursive: true })
   fs.writeFileSync(path.join(home, 'python.exe'), 'fixture-not-executable')
@@ -117,6 +117,23 @@ for (const version of ['0.22.2', '0.21.5']) test('isolated flow ' + version + ' 
   assert.equal(r.cases.length, 2); assert.equal(f.deletes.length, 2); assert.equal(f.taskMap.size, 0)
   assert.ok(r.cases.every(c => c.executionCount === 0 && c.normalCrudPassed))
   assert.ok(r.cases.every(c => c.priorTask?.state === 'missing' && c.priorTask.hresult === '0x80070002'), '须落盘注册前权威 absent 回执')
+})
+test('temp根经目录alias仍以物理路径构建fixture，旧新runtime都不放宽产品链接防护', async t => {
+  const base = fs.realpathSync(os.tmpdir()), outer = fs.mkdtempSync(path.join(base, 'hermes-collision-alias-owned-'))
+  const target = path.join(outer, 'physical'), alias = path.join(outer, 'alias')
+  fs.mkdirSync(target); fs.symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  t.after(() => {
+    const actual = fs.realpathSync(outer), relative = path.relative(base, actual)
+    assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative) && path.basename(actual).startsWith('hermes-collision-alias-owned-'))
+    assert.equal(fs.realpathSync(alias), fs.realpathSync(target))
+    fs.rmSync(actual, { recursive: true, force: true })
+  })
+  for (const version of ['0.22.2', '0.21.5']) await t.test(version, async child => {
+    const f = fixture(child, null, version, alias), { runProfileCollisionFixture } = await load()
+    const result = await runProfileCollisionFixture(f.options, f.deps)
+    assert.equal(result.status, 'passed-fixture', JSON.stringify(result.errors))
+    assert.equal(f.options.home, fs.realpathSync(f.options.home), '仅规范fixture temp root，产品拒绝链接规则不变')
+  })
 })
 for (const fault of ['unknown', 'occupied', 'register-race', 'enabled', 'highest', 'SYSTEM', 'trigger', 'initial-run', 'missing-default', 'derive-pin', 'derive-home', 'derive-method', 'derive-python', 'unguarded', 'file-loss', 'history-loss', 'foreign-loss', 'no-card-after', 'task-loss', 'task-change', 'executed', 'unrelated-error', 'no-toast', 'cleanup-identity', 'normal-crud']) {
   test('fail closed and preserve scene: ' + fault, async t => {
