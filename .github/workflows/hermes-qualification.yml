@@ -15,6 +15,10 @@ on:
         type: choice
         options: [windows, linux, both]
         default: both
+      startup_diagnostic:
+        description: '仅 Windows 冷启动观测，不构成资格通过；保留原20秒判定'
+        type: boolean
+        default: false
       baseline_sha:
         description: '旧版0.21.5导出的完整40位SHA；不改安装pin'
         type: string
@@ -52,6 +56,8 @@ jobs:
         name: 在 checkout 候选之前验证完整 SHA（无 shell 输入插值）
         env:
           TARGET: ${{ inputs.target }}
+          PLATFORM: ${{ inputs.platform }}
+          STARTUP_DIAGNOSTIC: ${{ inputs.startup_diagnostic }}
           BASELINE_SHA: ${{ inputs.baseline_sha }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
@@ -88,14 +94,17 @@ jobs:
         id: web
         shell: pwsh
         env:
+          STARTUP_DIAGNOSTIC: ${{ inputs.startup_diagnostic }}
           CANDIDATE_SHA: ${{ matrix.sha }}
           EXPECTED_VERSION: ${{ matrix.version }}
           VARIANT: ${{ matrix.variant }}
         run: |
-          node tooling/scripts/test-hermes-windows-qualification.mjs --execute --root candidate --sha "$env:CANDIDATE_SHA" --version "$env:EXPECTED_VERSION" --variant "$env:VARIANT" --output "$env:RUNNER_TEMP/hermes-qualification-$env:VARIANT"
+          $diagnosticArgs = @(); if ($env:STARTUP_DIAGNOSTIC -eq 'true') { $diagnosticArgs = @('--startup-diagnostic') }
+          node tooling/scripts/test-hermes-windows-qualification.mjs @diagnosticArgs --execute --root candidate --sha "$env:CANDIDATE_SHA" --version "$env:EXPECTED_VERSION" --variant "$env:VARIANT" --output "$env:RUNNER_TEMP/hermes-qualification-$env:VARIANT"
           exit $LASTEXITCODE
       - name: 原资格先验、同 Web HOME 的私有 Rust 工具链（不写宿主 PATH）
         id: native_environment
+        if: ${{ !inputs.startup_diagnostic }}
         shell: pwsh
         env:
           CANDIDATE_SHA: ${{ matrix.sha }}
@@ -143,6 +152,7 @@ jobs:
           '@ | node --input-type=module
           exit $LASTEXITCODE
       - name: 固定既有 v2 Rust cache 的不可变 commit（仅私有 Cargo/构建缓存）
+        if: ${{ !inputs.startup_diagnostic }}
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2，官方 annotated tag 已解引用
         with:
           prefix-key: hermes-qualification-native-v1
@@ -152,6 +162,7 @@ jobs:
           cache-bin: false
       - name: 同 SHA 原配置 no-bundle 构建、精确 WebView2 配套 driver（无全局安装）
         id: native_build
+        if: ${{ !inputs.startup_diagnostic }}
         shell: pwsh
         env:
           CANDIDATE_SHA: ${{ matrix.sha }}
@@ -206,6 +217,7 @@ jobs:
           exit $LASTEXITCODE
       - name: 实际 ClawPanel.exe WebView2 两轮及 Rust update/uninstall/install/STOP
         id: native
+        if: ${{ !inputs.startup_diagnostic }}
         shell: pwsh
         env:
           CANDIDATE_SHA: ${{ matrix.sha }}
@@ -324,7 +336,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: hermes-windows-${{ matrix.variant }}-${{ matrix.sha }}
+          name: hermes-windows-${{ matrix.variant }}-${{ matrix.sha }}${{ inputs.startup_diagnostic && '-diagnostic' || '' }}
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
@@ -333,7 +345,7 @@ jobs:
   linux-long-ui:
     name: Linux ${{ matrix.variant }} — fresh11 + two warm Send8/210s UI rounds
     needs: prepare
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'qingchencloud/clawpanel' && inputs.platform != 'windows'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'qingchencloud/clawpanel' && inputs.platform != 'windows' && !inputs.startup_diagnostic
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:

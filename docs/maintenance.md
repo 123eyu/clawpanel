@@ -79,6 +79,8 @@ App 只需要 Contents / Pull requests 写入权限及必要的元数据读取�
 
 Linux 使用原可信 Runtime.Dockerfile、非 root、只读 tooling、无 Docker socket 的容器。实际 fresh11 通过后在原容器同 HOME 启动生产 Web，运行两轮真实 headless Chromium，每轮完整 Send8、210 秒和 42 次健康采样；最后调用生产 STOP 并核验 PID/端口。没有实际运行、缺证据或旧报告均失败。Windows Web 生命周期与原生 Tauri 分开记录；`test-hermes-tauri-qualification.mjs` 使用真实 WebDriver/WebView2/Rust IPC，尚未执行时保持 native 缺口，不能由布尔值回执补绿。
 
+冷启动排障可显式选择 `startup_diagnostic=true`（默认关闭，仅 Windows）。真实 VM/SID 准入和 privatecompletion 核验后，可信工具才对本次 Gateway 启动开启 Python importtime，并只读统计私有依赖目录的 pyc 元数据。PM 原脚本、source/currency/products/stamp/boot 校验、20 秒启动、15 秒 CLI 和 900 秒安装预算保持不变。诊断不执行 native 生命周期、不得作为发布资格；报告固定 `qualificationPass=false`，完整汇总仍拒绝缺失 native/生命周期证据。后置晚就绪只说明诊断观察，不将启动超时转绿。输出为带 `-diagnostic` 后缀的独立脱敏 artifact，正常资格必须另跑。
+
 原始证据保留在一次性 runner，公开 artifact 仅包含另外生成的脱敏副本；不上传 HOME、dotenv、运行时、缓存或真实凭据，trace ZIP 逐成员脱敏。资格验收本身不提交、不升级用户机器、不打 tag。
 
 在仓库根目录执行（不会改动真实运行时）：

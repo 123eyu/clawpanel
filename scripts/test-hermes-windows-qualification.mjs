@@ -9,6 +9,8 @@ import http from 'node:http'
 import net from 'node:net'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { prepareStartupDiagnosticSpawn, startHermesFilePhaseObservation } from './hermes-startup-diagnostic.mjs'
+import { observeHermesPythonCache } from './hermes-python-cache-observation.mjs'
 import { classifyHermesMetadataRequest } from './hermes-qualification-provider.mjs'
 
 export const STAGES = ['source-isolation', 'install-privatecompletion', 'runtime-ui', 'update-stop', 'uninstall-reinstall-preserve']
@@ -22,7 +24,7 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const alive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
 
 export function parseArgs(args) {
-  const flags = new Set(['--plan', '--execute', '--help', '--matrix'])
+  const flags = new Set(['--plan', '--execute', '--help', '--matrix', '--startup-diagnostic'])
   const values = new Set(['--root', '--sha', '--version', '--variant', '--output', '--verify-linux-evidence', '--publish-evidence'])
   const o = {}
   for (let i = 0; i < args.length; i++) {
@@ -35,10 +37,12 @@ export function parseArgs(args) {
   if (o['--version']) assert.match(o['--version'], /^0\.\d+\.\d+$/, '必须精确版本')
   if (o['--variant']) assert.ok(['old', 'new'].includes(o['--variant']), 'variant 必须 old/new')
   assert.ok([o['--plan'], o['--execute'], o['--matrix'], o['--verify-linux-evidence'], o['--publish-evidence']].filter(Boolean).length <= 1, '模式互斥')
+  if (o['--startup-diagnostic']) assert.equal(o['--execute'], true, 'startup diagnostic requires execute')
   return o
 }
 
 export function matrixFromInputs(env) {
+  if (env.STARTUP_DIAGNOSTIC === 'true') assert.notEqual(env.PLATFORM, 'linux', 'startup diagnostic requires Windows')
   assert.ok(['baseline', 'candidate', 'both'].includes(env.TARGET), 'target 无效')
   const include = []
   for (const [target, variant, key, version] of [['baseline', 'old', 'BASELINE_SHA', '0.21.5'], ['candidate', 'new', 'CANDIDATE_SHA', '0.22.2']]) {
@@ -192,6 +196,7 @@ export function classifyProviderRequest(body) {
 }
 
 export function qualificationStatus(r) {
+  if (r.diagnostic?.enabled) return r.hostUnchanged === true ? 'diagnostic-only-not-qualification' : 'failed'
   if (!STAGES.every(name => r.stages?.some(s => s.name === name && s.status === 'passed')) || !r.hostUnchanged) return 'failed'
   const b = r.browser
   if (!b?.actualChromium || !b.trace || !b.screenshots?.length || b.pageErrors?.length !== 0 || !b.completeReply || !b.historyAfterReload) return 'failed'
@@ -409,8 +414,11 @@ export function createHermesPhaseReceiver(fs, file, childPid, observerPid, enabl
 }
 
 // 只旁听真实 spawn 的参数/输出/退出，不替换返回值、环境、信号或阶段执行。
-export function spawnAuditSource(log) {
-  return `import cp from 'node:child_process';import fs from 'node:fs';import {StringDecoder} from 'node:string_decoder';import {syncBuiltinESMExports} from 'node:module';const original=cp.spawn;const file=${JSON.stringify(log)};const phaseReceiver=${createHermesPhaseReceiver.toString()};cp.spawn=function(...args){const child=Reflect.apply(original,this,args);const a=Array.isArray(args[1])?args[1]:[];const i=a.findIndex(x=>String(x).toLowerCase()==='-stage');const record=v=>fs.appendFileSync(file,JSON.stringify({pid:child.pid,program:args[0],args:a,stage:i>=0?a[i+1]:null,...v,at:new Date().toISOString()})+'\\n');if(child.pid)record({event:'start'});const phase=phaseReceiver(fs,file,child.pid,process.pid,process.env.CLAWPANEL_HERMES_PHASE_TIMING==='1');const outDecoder=new StringDecoder('utf8'),errDecoder=new StringDecoder('utf8');let stdout='',stderr='';child.stdout?.on('data',d=>{stdout=(stdout+(typeof d==='string'?d:outDecoder.write(d))).slice(-1048576)});child.stderr?.on('data',d=>{stderr=(stderr+(typeof d==='string'?d:errDecoder.write(d))).slice(-1048576);phase(d)});child.on('close',(code,signal)=>{stdout=(stdout+outDecoder.end()).slice(-1048576);stderr=(stderr+errDecoder.end()).slice(-1048576);record({event:'close',exitCode:code,signal,stdout,stderr})});return child};syncBuiltinESMExports();`
+export function spawnAuditSource(log, diagnostic = null) {
+  const injection = diagnostic ? `const startHermesFilePhaseObservation=${startHermesFilePhaseObservation.toString()};const configFile=${JSON.stringify(diagnostic.configFile)};const prepareStartupDiagnosticSpawn=${prepareStartupDiagnosticSpawn.toString()};` : ''
+  const prepare = diagnostic ? `let diagnosticConfig=null;let diagnosticSpawn=false;if(Array.isArray(args[1])&&fs.existsSync(configFile)){diagnosticConfig=JSON.parse(fs.readFileSync(configFile,'utf8'));const originalSpec={program:args[0],args:args[1],options:args[2]};const prepared=prepareStartupDiagnosticSpawn(originalSpec,diagnosticConfig);diagnosticSpawn=prepared!==originalSpec;args=[prepared.program,prepared.args,prepared.options]};` : ''
+  const fileObservation = diagnostic ? `if(diagnosticSpawn&&child.pid){const receiver=phaseReceiver(fs,diagnosticConfig.phaseOutput,child.pid,process.pid,true);const stopFile=startHermesFilePhaseObservation({fs,path,file:diagnosticConfig.gatewayLog,receive:receiver,onFinish:receipt=>record({event:'hermes-file-observation',receipt})});child.once('close',()=>stopFile())};` : ''
+  return `import cp from 'node:child_process';import fs from 'node:fs';import path from 'node:path';import {StringDecoder} from 'node:string_decoder';import {syncBuiltinESMExports} from 'node:module';const original=cp.spawn;${injection}const file=${JSON.stringify(log)};const phaseReceiver=${createHermesPhaseReceiver.toString()};cp.spawn=function(...args){${prepare}const child=Reflect.apply(original,this,args);const a=Array.isArray(args[1])?args[1]:[];const i=a.findIndex(x=>String(x).toLowerCase()==='-stage');const record=v=>fs.appendFileSync(file,JSON.stringify({pid:child.pid,program:args[0],args:a,stage:i>=0?a[i+1]:null,...v,at:new Date().toISOString()})+'\\n');if(child.pid)record({event:'start'});const phase=phaseReceiver(fs,file,child.pid,process.pid,process.env.CLAWPANEL_HERMES_PHASE_TIMING==='1');const outDecoder=new StringDecoder('utf8'),errDecoder=new StringDecoder('utf8');${fileObservation}let stdout='',stderr='';child.stdout?.on('data',d=>{stdout=(stdout+(typeof d==='string'?d:outDecoder.write(d))).slice(-1048576)});child.stderr?.on('data',d=>{stderr=(stderr+(typeof d==='string'?d:errDecoder.write(d))).slice(-1048576);phase(d)});child.on('close',(code,signal)=>{stdout=(stdout+outDecoder.end()).slice(-1048576);stderr=(stderr+errDecoder.end()).slice(-1048576);record({event:'close',exitCode:code,signal,stdout,stderr})});return child};syncBuiltinESMExports();`
 }
 
 async function reachable(port) { return new Promise(resolve => { const s = net.connect({ host: '127.0.0.1', port }); s.on('connect', () => { s.destroy(); resolve(true) }); s.on('error', () => resolve(false)); s.setTimeout(750, () => { s.destroy(); resolve(false) }) }) }
@@ -438,6 +446,8 @@ async function execute(o) {
   for (const k of ['--root', '--sha', '--version', '--variant', '--output']) assert.ok(o[k], `缺少 ${k}`)
   const output = path.resolve(o['--output']); physical(output); assert.ok(!fs.existsSync(output), '输出必须全新'); fs.mkdirSync(output, { recursive: true })
   const r = { schemaVersion: 1, status: 'failed', candidateSha: o['--sha'], expectedVersion: o['--version'], variant: o['--variant'], startedAt: new Date().toISOString(), commands: [], installerStarted: false, stages: STAGES.map(name => ({ name, status: 'missing' })), nativeTauri: { status: 'not-run', qualificationComplete: false }, limitations: ['仅手工一次性托管 Windows 的真实 Web 验收，不证明 native Tauri GUI', 'HOME 隔离不是 Windows HKCU 沙箱；因此本机/self-hosted 均在候选执行前拒绝', '不自动恢复宿主变更，不自动重试，不使用业务凭据或收费模型'] }
+  const diagnostic = o['--startup-diagnostic'] === true
+  if (diagnostic) r.diagnostic = { enabled: true, scope: 'diagnostic-only-not-acceptance', qualificationPass: false, originalStartupBudgetMs: 20000, cliBudgetMs: 15000, installBudgetMs: 900000 }
   const save = () => fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(r, null, 2))
   const write = (name, value) => fs.writeFileSync(path.join(output, name), JSON.stringify(value, null, 2))
   let env, home, project, checkout, before, proof, web, provider, base, runtimePort, dashboardPort, browser, context, cli, python, release, lastSession, stopped = true, installCursor = 0
@@ -534,7 +544,7 @@ async function execute(o) {
     r.runnerAdmission = { passed: false, failedConditions: runnerProofFailures(proof) }
     r.runnerAdmission.passed = r.runnerAdmission.failedConditions.length === 0
     write('runner-admission.json', r.runnerAdmission); save(); validateRunnerProof(proof)
-    r.toolingDependencies = Object.fromEntries(['scripts/test-hermes-windows-qualification.mjs', 'scripts/hermes-qualification-provider.mjs'].map(file => [file, hash(path.join(tooling, file))]))
+    r.toolingDependencies = Object.fromEntries(['scripts/test-hermes-windows-qualification.mjs', 'scripts/hermes-qualification-provider.mjs', 'scripts/hermes-startup-diagnostic.mjs', 'scripts/hermes-python-cache-observation.mjs'].map(file => [file, hash(path.join(tooling, file))]))
     write('tooling-dependencies.json', { sha: proof.toolingSha, files: r.toolingDependencies })
     assert.ok(within(physical(process.env.RUNNER_TEMP), output), '输出不在本次 RUNNER_TEMP')
     checkout = resolveQualificationCheckout(o['--root'])
@@ -579,11 +589,22 @@ async function execute(o) {
     fs.writeFileSync(path.join(env.OPENCLAW_CONFIG_DIR, 'clawpanel.json'), JSON.stringify({ ignoreRisk: true, openclawDir: env.OPENCLAW_CONFIG_DIR, engineMode: 'hermes', enabledEngines: ['hermes'], engineSetupChoice: 'explicit' }))
     fs.writeFileSync(path.join(env.OPENCLAW_CONFIG_DIR, 'openclaw.json'), '{}\n')
     r.environment = { home, hermesHome: env.HERMES_HOME, output, source: project, checkout, sourceSha: o['--sha'] }
-    const audit = path.join(home, 'spawn-audit.mjs'); fs.writeFileSync(audit, spawnAuditSource(path.join(output, 'spawn-audit.jsonl')))
+    const audit = path.join(home, 'spawn-audit.mjs'); fs.writeFileSync(audit, spawnAuditSource(path.join(output, 'spawn-audit.jsonl'), diagnostic ? { configFile: path.join(output, 'startup-diagnostic-config.json') } : null))
     web = spawn(process.execPath, ['--import', pathToFileURL(audit).href, path.join(project, 'scripts/serve.js'), '--host', '127.0.0.1', '--port', String(webPort)], { cwd: project, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     r.webPid = web.pid; r.webPort = webPort; web.stdout.on('data', d => fs.appendFileSync(path.join(output, 'serve.stdout.log'), d)); web.stderr.on('data', d => fs.appendFileSync(path.join(output, 'serve.stderr.log'), d)); web.on('exit', (code, signal) => { r.webExit = { code, signal, at: new Date().toISOString() }; save() })
     base = `http://127.0.0.1:${webPort}`; await until(() => reachable(webPort), 30000)
-    await stage('install-privatecompletion', async () => { r.installerStarted = true; markInstall(); save(); await api('install_hermes', { method: 'uv-tool' }, 900000); return completion() })
+    await stage('install-privatecompletion', async () => { r.installerStarted = true; markInstall(); save(); await api('install_hermes', { method: 'uv-tool' }, 900000); const receipt = await completion()
+      if (diagnostic) {
+        const config = { enabled: true, scope: r.diagnostic.scope, version: o['--version'], gatewayLog: path.join(env.HERMES_HOME, 'gateway-run.log'), phaseOutput: path.join(output, 'startup-file-phases.jsonl') }
+        if (o['--version'] === '0.22.2') {
+          config.pmScript = fs.readFileSync(path.join(project, 'scripts/hermes-pm-runtime.js'), 'utf8').match(/export const HERMES_PRIVATE_LAUNCH_SCRIPT = String.raw`([\s\S]*?)\n`/)?.[1]
+          assert.ok(config.pmScript?.includes(release.commit), '缺固定 PM launch script'); config.pmScript += '\n'; config.pin = release.commit
+        }
+        write('startup-diagnostic-config.json', config)
+        r.diagnostic.pythonCache = observeHermesPythonCache({ home, modulePaths: [receipt.modules.fastapi] })
+        write('python-cache-observation.json', r.diagnostic.pythonCache)
+      }
+      return receipt })
     await stage('runtime-ui', async () => {
       const providerModels = ['qualification-one', 'qualification-two']
       provider = http.createServer(async (req, res) => {
@@ -623,6 +644,7 @@ async function execute(o) {
       await api('hermes_env_set', { key: 'API_SERVER_HOST', value: '127.0.0.1' }); await api('hermes_env_set', { key: 'API_SERVER_PORT', value: String(runtimePort) }); await api('hermes_set_gateway_url', { url: `http://127.0.0.1:${runtimePort}` })
       const profiles = await api('hermes_profiles_list'); assert.ok(profiles.profiles.some(p => p.name === 'default')); await api('hermes_profile_use', { name: 'default' })
       stopped = false; await api('hermes_gateway_action', { action: 'start' }); await api('hermes_health_check'); await api('hermes_capabilities'); await api('hermes_gateway_action', { action: 'status' })
+      if (diagnostic) { r.diagnostic.gatewayReadyWithinBudget = true; await capturePids(); return { scope: r.diagnostic.scope, gatewayReadyWithinBudget: true } }
       const dash = await api('hermes_dashboard_start'); assert.equal(dash.started, true); assert.equal((await api('hermes_dashboard_probe')).running, true); await capturePids()
       await run(process.execPath, [npmCli, 'install', '--prefix', path.join(home, 'browser-tools'), '--no-save', '--ignore-scripts', '--package-lock=false', 'playwright@1.58.2'], { timeout: 600000 })
       await run(process.execPath, [path.join(home, 'browser-tools/node_modules/playwright/cli.js'), 'install', 'chromium'], { timeout: 600000 })
@@ -647,10 +669,12 @@ async function execute(o) {
       r.browser = { actualChromium: true, screenshots, trace: 'trace.zip', pageErrors, completeReply: true, historyAfterReload: true, prompts }; write('browser-report.json', r.browser)
       return { profiles, dash, providerRequests: calls.length }
     })
+    if (!diagnostic) {
     const sentinel = path.join(env.HERMES_HOME, 'memories/qualification.txt'); fs.mkdirSync(path.dirname(sentinel), { recursive: true }); fs.writeFileSync(sentinel, o['--sha']); const sentinelHash = hash(sentinel)
     const preserve = async () => { assert.equal(hash(sentinel), sentinelHash); assert.ok(fs.readFileSync(path.join(env.HERMES_HOME, 'config.yaml'), 'utf8').includes(`qualification_marker: ${o['--sha']}`)); assert.ok((await api('hermes_profiles_list')).profiles.some(p => p.name === 'default')); assert.equal((await api('hermes_read_config')).model_raw, 'qualification-two'); return history() }
     await stage('update-stop', async () => { await stopRuntime(); markInstall(); await api('update_hermes', {}, 900000); await completion(); await preserve(); return { productionStop: true, updateVerified: true } })
     await stage('uninstall-reinstall-preserve', async () => { await api('uninstall_hermes', { cleanConfig: false }); assert.equal((await api('check_hermes')).installed, false); assert.equal(hash(sentinel), sentinelHash); markInstall(); await api('install_hermes', { method: 'uv-tool' }, 900000); await completion(); await preserve(); stopped = false; await api('hermes_gateway_action', { action: 'start' }); await api('hermes_health_check'); assert.equal((await api('hermes_dashboard_start')).started, true); await capturePids(); await stopRuntime(); return { cleanConfig: false, actualHistoryReRead: true, memoryHash: sentinelHash, reinstalled: true, restartedAndStopped: true } })
+    }
   } catch (e) {
     r.error = e.stack;
     if (env && runtimePort && /Gateway 启动后端口未就绪/.test(r.error)) {
@@ -687,7 +711,7 @@ async function execute(o) {
     r.status = r.error || r.stopError || r.browserCleanupError || r.cleanupError || r.providerError ? 'failed' : qualificationStatus(r); r.finishedAt = new Date().toISOString(); save()
   }
   console.log(JSON.stringify({ status: r.status, candidateSha: r.candidateSha, output, nativeTauri: 'not-run' }))
-  return r.status === 'passed-web-native-missing' ? 0 : 1
+  return r.status === 'passed-web-native-missing' || r.status === 'diagnostic-only-not-qualification' ? 0 : 1
 }
 
 async function main() {
