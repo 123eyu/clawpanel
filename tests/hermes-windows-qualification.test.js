@@ -935,3 +935,24 @@ test('strict标题响应：真实接线handler返回JSON title，保留SSE/chat/
   } catch (error) { report.passed = false; report.error = String(error); throw error }
   finally { await new Promise(resolve => server.close(resolve)); report.loopbackClosed = !server.listening; fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n', { flag: 'wx' }); t.diagnostic('Exact handler HTTP evidence: ' + out) }
 })
+
+test('native标题family：显式canonical family、不改写nonce、未知family拒绝', async () => {
+  const q = await load(), item = titleFixture.rawCases[0], body = JSON.parse(item.rawBody)
+  const nonce = 'native-acceptance-12345678-1234-1234-1234-123456789abc'
+  body.model = 'native-one'; body.messages[1].content = nonce
+  const evidence = { ...titleEvidence(item), nonceFamily: 'native', models: ['native-one', 'native-two'], calls: [{ purpose: 'chat', nonce, model: body.model, authenticated: true, stream: true }] }
+  for (const source of titleFixture.upstream) {
+    assert.equal(q.classifyProviderRequest(body, { ...evidence, pin: source.pin }), 'title')
+    assert.deepEqual(JSON.parse(q.qualificationProviderReply(body, nonce, { ...evidence, pin: source.pin })), { title: `Hermes qualification ${nonce} native-one` })
+  }
+  for (const nonceFamily of [undefined, 'web', 'unknown', null, '', true]) assert.equal(q.classifyProviderRequest(body, { ...evidence, nonceFamily }), 'unattributed')
+  for (const bad of [nonce.toUpperCase(), nonce + 'x', nonce.replace('native-acceptance-', 'hq-'), 'prefix ' + nonce]) {
+    const changed = structuredClone(body); changed.messages[1].content = bad; assert.equal(q.classifyProviderRequest(changed, evidence), 'unattributed')
+  }
+  const webBody = JSON.parse(item.rawBody)
+  assert.equal(q.classifyProviderRequest(webBody, titleEvidence(item)), 'title')
+  assert.equal(q.classifyProviderRequest(webBody, { ...titleEvidence(item), nonceFamily: 'web' }), 'title')
+  assert.equal(q.classifyProviderRequest(webBody, { ...titleEvidence(item), nonceFamily: 'native' }), 'unattributed')
+  for (const nonceFamily of ['unknown', null, '']) assert.equal(q.classifyProviderRequest(webBody, { ...titleEvidence(item), nonceFamily }), 'unattributed')
+  assert.equal(body.messages[1].content, nonce)
+})

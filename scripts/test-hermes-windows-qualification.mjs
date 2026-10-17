@@ -269,7 +269,7 @@ export function validatePrivateCompletion(r, expected) {
 }
 
 // 固定 f976/d923 agent/title_generator.py：完整prompt与R26实际wire核验；不扩展旧前缀。
-function matchesPinnedTitleRequest(body, evidence) {
+export function matchesPinnedTitleRequest(body, evidence) {
   const record = (value, keys) => {
     if (!value || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false
     const descriptors = Object.getOwnPropertyDescriptors(value), own = Reflect.ownKeys(descriptors)
@@ -285,10 +285,13 @@ function matchesPinnedTitleRequest(body, evidence) {
     return keys.every(k => Object.hasOwn(descriptors[k] || {}, 'value') && exact(descriptors[k].value, expected[k]))
   }
   if (!evidence || evidence.method !== 'POST' || evidence.path !== '/v1/chat/completions' || evidence.authenticated !== true || !['f97608f178d1ffeca59860195ab7da295f7c8e5f', 'd923a5eb487a17c0a68801bba9ef0f56c81040a8'].includes(evidence.pin)) return false
+  const family = evidence.nonceFamily === undefined ? 'web' : evidence.nonceFamily
+  if (!['web', 'native'].includes(family)) return false
+  const noncePattern = family === 'native' ? /^native-acceptance-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/ : /^hq-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
   if (!record(body, ['messages', 'model', 'reasoning_effort', 'response_format']) || !Array.isArray(evidence.models) || !evidence.models.includes(body.model) || !Array.isArray(evidence.calls)) return false
   if (!Array.isArray(body.messages) || body.messages.length !== 2 || Reflect.ownKeys(body.messages).length !== 3 || !body.messages.every(m => record(m, ['role', 'content']))) return false
   const [system, user] = body.messages
-  if (system.role !== 'system' || typeof system.content !== 'string' || crypto.createHash('sha256').update(system.content).digest('hex') !== '3f1eef0616ddd2c13d45a3f8cef4ed648dadfdacdba7fbedceebf5a04d549998' || user.role !== 'user' || typeof user.content !== 'string' || !/^hq-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(user.content)) return false
+  if (system.role !== 'system' || typeof system.content !== 'string' || crypto.createHash('sha256').update(system.content).digest('hex') !== '3f1eef0616ddd2c13d45a3f8cef4ed648dadfdacdba7fbedceebf5a04d549998' || user.role !== 'user' || typeof user.content !== 'string' || !noncePattern.test(user.content)) return false
   const format = { type: 'json_schema', json_schema: { name: 'session_title', strict: true, schema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false } } }
   if (body.reasoning_effort !== 'none' || !exact(body.response_format, format)) return false
   const prior = evidence.calls.filter(c => c.purpose === 'chat' && c.authenticated === true && c.stream === true && c.nonce === user.content && c.model === body.model)
