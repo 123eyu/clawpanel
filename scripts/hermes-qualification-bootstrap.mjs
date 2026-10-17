@@ -6,6 +6,7 @@ import path from 'node:path'
 import http from 'node:http'
 import net from 'node:net'
 import crypto from 'node:crypto'
+import { errorMonitor } from 'node:events'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { classifyHermesMetadataRequest } from './hermes-qualification-provider.mjs'
@@ -23,6 +24,122 @@ const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex')
 const jsonHash = x => sha(JSON.stringify(x))
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 const stamp = () => new Date().toISOString()
+export const PROXY_CONTEXT_LIMITS = Object.freeze({ eventsPerRequest: 16, lineBytes: 4096, totalBytes: 1048576 })
+
+// 只记录代理自身已观察的顺序，不把错误字符串或时间接近当因果。
+export function createProxyContextRecorder({ appendLine, sourceSha } = {}) {
+  const prefix = '[HERMES_PROXY_CONTEXT] ', origin = process.hrtime.bigint(), runId = crypto.randomUUID()
+  const routes = new Map([
+    ['/', 'document:root'], ['/ws', 'gateway-ws'],
+    ...['hermes_sessions_list', 'hermes_session_detail', 'hermes_profiles_list', 'hermes_agent_run_stream', 'check_hermes', 'hermes_health_check', 'hermes_gateway_action', 'health', 'auth_check', 'read_panel_config', 'get_portable_status'].map(cmd => [`/__api/${cmd}`, `api:${cmd}`]),
+  ])
+  const kinds = new Set(['request-start', 'request-end', 'request-aborted', 'upstream-created', 'upstream-connect', 'response-headers', 'response-end', 'response-aborted', 'response-error', 'upstream-error', 'upstream-close', 'downstream-finish', 'downstream-close', 'downstream-error', 'handler-error', 'unknown-error', 'local-destroy'])
+  const reasons = new Set(['downstream-aborted', 'downstream-response-close-before-end', 'downstream-socket-close', 'downstream-socket-error'])
+  const flagKeys = ['reqComplete', 'reqAborted', 'resHeadersSent', 'resEnded', 'resDestroyed', 'upstreamDestroyed', 'headersReceived', 'reusedSocket']
+  const codes = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', 'ERR_STREAM_PREMATURE_CLOSE'])
+  const state = { requests: 0, events: 0, errors: 0, closedRequests: 0, linesWritten: 0, bytesWritten: 0, bytesAttempted: 0, evidenceIncomplete: false, eventLimitExceeded: 0, lineLimitExceeded: 0, totalLimitExceeded: 0, writeFailures: 0, observerFailures: 0 }
+  let eventSeq = 0, integrityAttempted = false
+  const pin = typeof sourceSha === 'string' && /^[a-f0-9]{40}$/.test(sourceSha) ? sourceSha : 'unknown'
+  if (pin === 'unknown') incomplete('observerFailures')
+  const clock = () => (process.hrtime.bigint() - origin).toString()
+  // 终态必须双端close齐全；只报告缺口，不为此延长原停止等待或改变资格门禁。
+  const summary = () => Object.freeze({ ...state, openRequests: state.requests - state.closedRequests, evidenceIncomplete: state.evidenceIncomplete || state.requests !== state.closedRequests })
+  function incomplete(counter) { state.evidenceIncomplete = true; state[counter]++ }
+  function append(row, integrity = false) {
+    try {
+      const line = prefix + JSON.stringify(row) + '\n', bytes = Buffer.byteLength(line)
+      if (bytes > PROXY_CONTEXT_LIMITS.lineBytes) { incomplete('lineLimitExceeded'); return false }
+      // 预留固定完整性标记空间，超预算绝不静默截断。
+      if (state.bytesAttempted + bytes > PROXY_CONTEXT_LIMITS.totalBytes - (integrity ? 0 : 768)) { incomplete('totalLimitExceeded'); return false }
+      state.bytesAttempted += bytes
+      try { appendLine(line) } catch { incomplete('writeFailures'); return false }
+      state.linesWritten++; state.bytesWritten += bytes
+      return true
+    } catch { incomplete('observerFailures'); return false }
+  }
+  function integrity() {
+    if (!state.evidenceIncomplete || integrityAttempted) return
+    integrityAttempted = true
+    append({ kind: 'evidence-incomplete', schemaVersion: 1, runId, sourceSha: pin, at: stamp(), eventSeq, monotonicNs: clock(), ...summary() }, true)
+  }
+  function begin(input = {}) {
+    const requestSeq = ++state.requests, startedAt = stamp(), events = []
+    let branch = 'unknown', method = 'OTHER', route = 'other', localDestroy = null, firstErrorSeq = null, errorCode = null, firstErrorPhase = null
+    let bad = false, uncertainError = false, currentErrorPhase = null, abortedSeq = null, closedSeq = null, upstreamClosed = false, downstreamClosed = false, finalized = false
+    try {
+      const suppliedBranch = input.branch, suppliedMethod = input.method
+      if (['http', 'upgrade'].includes(suppliedBranch)) branch = suppliedBranch
+      else { bad = true; incomplete('observerFailures') }
+      if (['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(suppliedMethod)) method = suppliedMethod
+      else { bad = true; incomplete('observerFailures') }
+      route = routes.get(input.pathname) || 'other'
+    } catch { bad = true; incomplete('observerFailures') }
+    function classification() {
+      if (bad || uncertainError || state.evidenceIncomplete) return 'upstream-or-unknown'
+      if (firstErrorSeq === null) return 'no-error'
+      return branch === 'http' && firstErrorPhase === 'upstream-error' && errorCode === 'ECONNRESET' && localDestroy?.causeSeq && localDestroy.causeSeq < localDestroy.eventSeq && localDestroy.eventSeq < firstErrorSeq ? 'downstream-cancel-proven' : 'upstream-or-unknown'
+    }
+    function emit(phase) {
+      const row = { kind: 'request-context', schemaVersion: 1, runId, sourceSha: pin, requestSeq, branch, method, route, startedAt, at: stamp(), eventSeq, monotonicNs: clock(), phase, errorCode, firstErrorSeq, firstErrorPhase, errorPhase: currentErrorPhase, rawErrorExpected: phase === 'error' && branch === 'http' && ['upstream-error', 'handler-error'].includes(currentErrorPhase), localDestroy, classification: classification(), evidenceIncomplete: bad || state.evidenceIncomplete, events }
+      if (!append(row)) {
+        bad = true
+        integrity()
+      }
+    }
+    function event(kind, flags = {}) {
+      try {
+        const seq = ++eventSeq; state.events++
+        if (finalized) return null
+        if (!kinds.has(kind)) { bad = true; incomplete('observerFailures'); integrity(); return null }
+        if (events.length >= PROXY_CONTEXT_LIMITS.eventsPerRequest) { bad = true; incomplete('eventLimitExceeded'); integrity(); return null }
+        const safe = {}
+        for (const key of flagKeys) {
+          const suppliedFlag = flags[key]
+          if (typeof suppliedFlag === 'boolean') safe[key] = suppliedFlag
+          else if (suppliedFlag !== undefined) { bad = true; incomplete('observerFailures') }
+        }
+        events.push({ eventSeq: seq, monotonicNs: clock(), kind, ...safe })
+        if (kind === 'request-aborted' && safe.reqAborted === true) abortedSeq = seq
+        if (kind === 'downstream-close') {
+          downstreamClosed = true
+          if (safe.resEnded === false) closedSeq = seq
+        }
+        if (kind === 'upstream-close') upstreamClosed = true
+        if (downstreamClosed && upstreamClosed && !finalized) {
+          finalized = true; state.closedRequests++
+          // 正常请求只计数；错误或缺材料才补终态关联，并立即释放ring。
+          if (firstErrorSeq !== null || bad) emit('closed')
+          events.length = 0
+        }
+        return seq
+      } catch { bad = true; incomplete('observerFailures'); integrity(); return null }
+    }
+    function destroy(reason) {
+      try {
+        const safeReason = reasons.has(reason) ? reason : 'unknown'
+        const causeSeq = safeReason === 'downstream-aborted' ? abortedSeq : safeReason === 'downstream-response-close-before-end' ? closedSeq : null
+        const seq = event('local-destroy')
+        if (!localDestroy) localDestroy = { reason: safeReason, eventSeq: seq, causeSeq }
+      } catch { bad = true; incomplete('observerFailures'); integrity() }
+    }
+    function error(value, phase = 'upstream-error', flags = {}) {
+      try {
+        state.errors++
+        if (finalized) { bad = true; incomplete('observerFailures'); integrity() }
+        currentErrorPhase = ['upstream-error', 'response-error', 'downstream-error', 'handler-error'].includes(phase) ? phase : 'unknown-error'
+        const seq = event(currentErrorPhase, flags)
+        if (firstErrorSeq === null) { firstErrorSeq = seq; firstErrorPhase = currentErrorPhase }
+        const suppliedCode = value?.code
+        errorCode = codes.has(suppliedCode) ? suppliedCode : 'OTHER'
+        uncertainError ||= errorCode !== 'ECONNRESET' || currentErrorPhase !== 'upstream-error'
+        emit('error')
+      } catch { bad = true; incomplete('observerFailures'); integrity() }
+    }
+    event('request-start')
+    return Object.freeze({ event, destroy, error })
+  }
+  return Object.freeze({ begin, summary })
+}
 function requireProof(proof) { for (const k of PROOF_KEYS) assert.equal(proof?.[k], true, `容器 proof: ${k}`) }
 export function sourceInventory(presence) {
   return [...SOURCE_FILES, ...OPTIONAL_SOURCE_FILES.filter(file => {
@@ -230,6 +347,7 @@ export async function main(argv = process.argv.slice(2)) {
   const envFiles = ['.openclaw/clawpanel.json', '.openclaw/model-channels.json', '.hermes/.env', '.hermes/config.yaml', '.npmrc', '.gitconfig']
   const configHashes = () => Object.fromEntries(envFiles.map(file => [file, fs.existsSync(path.join(home, file)) ? sha(fs.readFileSync(path.join(home, file))) : null]))
   const before = configHashes(), key = `qualification-local-${crypto.randomUUID()}`, receipts = [], actions = [], observed = new Map()
+  const proxyContext = createProxyContextRecorder({ appendLine: line => fs.appendFileSync(path.join(output, 'errors-private.log'), line, { mode: 0o600 }), sourceSha: facts.sourceSha })
   let provider, front, web, ready, stopping = false, failed = false, lastAction = 'initializing', healthTimer, pendingAction
   let actionEpoch = 0
   const proxySockets = new Set()
@@ -294,6 +412,7 @@ export async function main(argv = process.argv.slice(2)) {
     await closeServer(front); await closeServer(provider)
     stop.portsClosed = stop.gatewayPortClosed && stop.dashboardPortClosed && (!webPort || !await portOpen(webPort)) && (!providerPort || !await portOpen(providerPort)) && !await portOpen(port)
     stop.errors = errors; stop.finishedAt = stamp()
+    stop.proxyContext = proxyContext.summary()
     stop.status = !failed && stop.productionStop && stop.pidsExited && stop.webExited && stop.portsClosed ? 'passed' : 'failed'
     write('provider-requests.json', receipts); write('stop.json', stop)
     console.log(JSON.stringify({ stopped: stop.status === 'passed', output, productionStop: stop.productionStop, pidsExited: stop.pidsExited, portsClosed: stop.portsClosed }))
@@ -361,6 +480,7 @@ export async function main(argv = process.argv.slice(2)) {
     ready = { schemaVersion: 1, status: 'ready', browserReady: true, mode: 'warm-after-original-fresh11', home, sourceSha: facts.sourceSha, version: facts.target.version, target: facts.target, webPid: web.pid, bootstrapPid: process.pid, gatewayPids: snap.gatewayPids, ports: { web: port, serve: webPort, gateway: gatewayPort, provider: providerPort, dashboard: dashboard.port }, webUrl: `http://127.0.0.1:${port}`, initial: snap, originalSources: ORIGINAL_SOURCES, nonPrivilegedProof: facts.currentProof, sourceHashes: facts.sourceHashes, verifierDependencyHashes: facts.dependencyHashes, freshReportSha256: sha(reportBytes), limitations: ['warm UI after fresh11; no signal attribution; no native Tauri; not releaseReady'] }
     write('ready.json', ready); write('configured-environment.json', { sha256: configuredHash, configs: configHashes(), originalConfigs: before, parentEnvHash })
     front = http.createServer(async (req, res) => {
+      let context
       try {
         const url = new URL(req.url, 'http://127.0.0.1')
         if (url.pathname.startsWith('/__qualification/')) {
@@ -369,30 +489,41 @@ export async function main(argv = process.argv.slice(2)) {
           assert.ok(value, '未知 qualification 路径'); res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end(JSON.stringify(value))
         }
         // 透明转发真实 UI/HTTP/SSE；只观察启停成功回执，不替换产品响应。
+        context = typeof proxyContext === 'undefined' ? null : proxyContext.begin({ branch: 'http', method: req.method, pathname: url.pathname })
+        req.once('end', () => context?.event('request-end', { reqComplete: req.complete }))
+        res.once('finish', () => context?.event('downstream-finish', { resEnded: res.writableEnded }))
         const observe = req.method === 'POST' && url.pathname === '/__api/hermes_gateway_action'
         let requestBody = '', responseBody = ''
         if (observe) {
           req.on('data', chunk => { if (requestBody.length < 4096) requestBody += chunk })
-          req.on('end', () => { try { const body = JSON.parse(requestBody); if (['start', 'stop'].includes(body.action)) { assert.equal(pendingAction, undefined, '不并发启动/停止'); pendingAction = { action: body.action, started: Date.now() }; actionEpoch++ } } catch (error) { rawError(error); failed = true } })
+          req.on('end', () => { try { const body = JSON.parse(requestBody); if (['start', 'stop'].includes(body.action)) { assert.equal(pendingAction, undefined, '不并发启动/停止'); pendingAction = { action: body.action, started: Date.now() }; actionEpoch++ } } catch (error) { context?.error(error, 'handler-error'); rawError(error); failed = true } })
         }
         const upstream = http.request({ host: '127.0.0.1', port: webPort, path: req.url, method: req.method, agent: false, headers: { ...req.headers, host: `127.0.0.1:${webPort}` } }, response => {
+          context?.event('response-headers', { headersReceived: true })
+          response.once('end', () => context?.event('response-end'))
+          response.once('aborted', () => context?.event('response-aborted'))
+          if (context) response.on(errorMonitor, error => context.error(error, 'response-error'))
           if (observe) {
             response.on('data', chunk => { if (responseBody.length < 65536) responseBody += chunk })
             response.on('end', () => {
-              try { const body = JSON.parse(requestBody), value = JSON.parse(responseBody), ok = response.statusCode >= 200 && response.statusCode < 300 && !value?.error; actions.push({ at: stamp(), cmd: 'hermes_gateway_action', action: body.action, status: response.statusCode, ok }); if (ok && ['start', 'stop'].includes(body.action)) lastAction = body.action; if (['start', 'stop'].includes(body.action)) { pendingAction = undefined; actionEpoch++ } write('api-actions.json', actions) } catch (error) { rawError(error); failed = true }
+              try { const body = JSON.parse(requestBody), value = JSON.parse(responseBody), ok = response.statusCode >= 200 && response.statusCode < 300 && !value?.error; actions.push({ at: stamp(), cmd: 'hermes_gateway_action', action: body.action, status: response.statusCode, ok }); if (ok && ['start', 'stop'].includes(body.action)) lastAction = body.action; if (['start', 'stop'].includes(body.action)) { pendingAction = undefined; actionEpoch++ } write('api-actions.json', actions) } catch (error) { context?.error(error, 'handler-error'); rawError(error); failed = true }
             })
           }
           res.writeHead(response.statusCode, response.headers); response.pipe(res)
         })
-        upstream.on('error', error => { rawError(error); if (!res.headersSent) res.writeHead(502); res.end() })
-        req.on('aborted', () => upstream.destroy()); res.on('close', () => { if (!res.writableEnded) upstream.destroy() }); req.pipe(upstream)
-      } catch (error) { rawError(error); if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' }); res.end('{"error":"qualification-assertion-failed"}') }
+        context?.event('upstream-created')
+        upstream.once('close', () => context?.event('upstream-close', { upstreamDestroyed: upstream.destroyed }))
+        upstream.on('error', error => { context?.error(error, 'upstream-error', { resHeadersSent: res.headersSent, resEnded: res.writableEnded, reusedSocket: upstream.reusedSocket }); rawError(error); if (!res.headersSent) res.writeHead(502); res.end() })
+        req.on('aborted', () => { context?.event('request-aborted', { reqAborted: req.aborted }); context?.destroy('downstream-aborted'); upstream.destroy() }); res.on('close', () => { context?.event('downstream-close', { resEnded: res.writableEnded }); if (!res.writableEnded) { context?.destroy('downstream-response-close-before-end'); upstream.destroy() } }); req.pipe(upstream)
+      } catch (error) { if (!context && typeof proxyContext !== 'undefined') context = proxyContext.begin({ branch: 'http', method: req.method }); context?.error(error, 'handler-error'); rawError(error); if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' }); res.end('{"error":"qualification-assertion-failed"}') }
     })
     front.on('upgrade', (req, socket, head) => {
+      const context = typeof proxyContext === 'undefined' ? null : proxyContext.begin({ branch: 'upgrade', method: req.method, pathname: req.url })
       const upstream = net.connect(webPort, '127.0.0.1', () => { upstream.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n` + Object.entries(req.headers).map(([k, v]) => `${k}: ${v}`).join('\r\n') + '\r\n\r\n'); if (head.length) upstream.write(head); socket.pipe(upstream).pipe(socket) })
+      context?.event('upstream-created')
       proxySockets.add(socket); proxySockets.add(upstream)
-      socket.once('close', () => proxySockets.delete(socket)); upstream.once('close', () => proxySockets.delete(upstream))
-      upstream.on('error', () => socket.destroy()); socket.on('error', () => upstream.destroy()); socket.on('close', () => upstream.destroy())
+      socket.once('close', () => { proxySockets.delete(socket); context?.event('downstream-close') }); upstream.once('close', () => { proxySockets.delete(upstream); context?.event('upstream-close') })
+      upstream.on('error', error => { context?.error(error); socket.destroy() }); socket.on('error', error => { context?.error(error, 'downstream-error'); context?.destroy('downstream-socket-error'); upstream.destroy() }); socket.on('close', () => { context?.destroy('downstream-socket-close'); upstream.destroy() })
     })
     await listen(front, port, host)
     // 只检查意外退出，不自动重启，也不吞掉长期 UI 中的红灯。
