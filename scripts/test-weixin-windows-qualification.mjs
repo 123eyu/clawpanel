@@ -12,6 +12,7 @@ import { pipeline } from 'node:stream/promises'
 import vm from 'node:vm'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { tokenObservationSource, publicTokenObservation } from './weixin-native-token-observation.mjs'
 
 const tooling=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..')
 const sha=b=>crypto.createHash('sha256').update(b).digest('hex')
@@ -49,11 +50,11 @@ export const REQUIRED_CASES=Object.freeze(['prepare-ui-unchecked','cancel-ui','a
 const PHASE_CASES=REQUIRED_CASES.filter(k=>!['wrong-window','scanner-failure'].includes(k))
 export function parseArgs(args){
  const o={},values=new Set(['--root','--sha','--host','--output','--scope'])
- for(let i=0;i<args.length;i++){const k=args[i];assert.ok(!Object.hasOwn(o,k),'重复参数');if(['--execute','--plan','--diagnostic-attach'].includes(k))o[k]=true;else{assert.ok(values.has(k)&&args[i+1]&&!args[i+1].startsWith('--'),'未知或缺值参数');o[k]=args[++i]}}
+ for(let i=0;i<args.length;i++){const k=args[i];assert.ok(!Object.hasOwn(o,k),'重复参数');if(['--execute','--plan','--diagnostic-attach','--observe-app-token'].includes(k))o[k]=true;else{assert.ok(values.has(k)&&args[i+1]&&!args[i+1].startsWith('--'),'未知或缺值参数');o[k]=args[++i]}}
  if(o['--sha'])assert.ok(exactSha(o['--sha']),'SHA 必须完整40位')
  if(o['--host'])assert.ok(Object.hasOwn(HOSTS,o['--host']),'仅固定官方5.12/9.8/10.4')
  if(o['--scope'])assert.ok(['complete','ui-origin'].includes(o['--scope']),'scope无效')
- assert.ok(!(o['--execute']&&o['--plan']),'模式互斥');assert.ok(!o['--diagnostic-attach']||!o['--scope'],'attach诊断与正式scope互斥');return o
+ assert.ok(!(o['--execute']&&o['--plan']),'模式互斥');assert.ok(!o['--diagnostic-attach']||!o['--scope'],'attach诊断与正式scope互斥');assert.ok(!o['--observe-app-token']||o['--diagnostic-attach'],'token观察仅显式attach诊断');return o
 }
 export function runnerProofFailures(p={}){
  // 完整复制合取语义，但用本 workflow 精确身份；从不改写 proof 去通过 Hermes 门禁。
@@ -453,8 +454,8 @@ export function processObservationSource(root,ports,tracked=[],controllerPid=pro
  assert.ok(Number.isInteger(controllerPid)&&controllerPid>0&&ports.every(p=>Number.isInteger(p)&&p>0&&p<65536)&&tracked.every(p=>Number.isInteger(p.pid)&&p.pid>0))
  return `$h=${psValue(root)};$ports=@(${ports.join(',')});$ids=@(${tracked.map(x=>x.pid).join(',')});$all=@(Get-CimInstance Win32_Process -ErrorAction Stop);$owned=@($all|Where-Object {$_.ProcessId -ne $PID -and $_.ProcessId -ne ${controllerPid} -and (($_.ExecutablePath -and $_.ExecutablePath.StartsWith($h+'\\',[StringComparison]::OrdinalIgnoreCase)) -or ($_.CommandLine -and $_.CommandLine.IndexOf($h+'\\',[StringComparison]::OrdinalIgnoreCase) -ge 0))});function Row($p){if(!$p -or !$p.CreationDate){throw 'Missing CreationDate'};@{pid=[int]$p.ProcessId;creationDate=$p.CreationDate.ToUniversalTime().ToString('o');exe=$p.ExecutablePath;commandLine=$(if($owned.ProcessId -contains $p.ProcessId){$p.CommandLine}else{$null})}};$listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq 'Listen' -and ($ports -contains [int]$_.LocalPort -or $owned.ProcessId -contains [int]$_.OwningProcess)}|ForEach-Object {$c=$_;$p=$all|Where-Object {$_.ProcessId -eq $c.OwningProcess}|Select-Object -First 1;$r=Row $p;$r.port=[int]$c.LocalPort;$r.localAddress=$c.LocalAddress;$r});@{processes=@($owned|ForEach-Object {Row $_});present=@($all|Where-Object {$ids -contains [int]$_.ProcessId}|ForEach-Object {Row $_});listeners=$listeners}|ConvertTo-Json -Compress -Depth 6`
 }
-function processSnapshot(root,ports,tracked=[],timeout=30000){
- const out=ps(processObservationSource(root,ports,tracked),timeout)
+function processSnapshot(root,ports,tracked=[],timeout=30000,tokenRequest){
+ const out=ps(tokenObservationSource(processObservationSource(root,ports,tracked),tokenRequest),timeout)
  return JSON.parse(out)
 }
 function hostExtra(profile){
@@ -549,6 +550,7 @@ async function execute(o){
    // 诊断保持单独scope，绝不为正式15case制造成功回执。
    report.nativeQualification=false;report.gaps=REQUIRED_CASES.map(id=>id+': diagnostic未执行正式资格')
    report.diagnostic={status:'started',actualEnvironmentObserved:false,sessionBudgetMs:60000,application,uiClicks:0,readonlyIPC:null}
+   if(o['--observe-app-token'])report.diagnostic.tokenObservationRequested=true
    const binaryFiles={application,driver:edge,runtime:runtime.path},binaryBefore=Object.fromEntries(Object.entries(binaryFiles).map(([k,f])=>[k,hash(f)]))
    assert.equal(binaryBefore.application,report.build.exeSha256);assert.equal(binaryBefore.driver,report.drivers.edge.sha256)
    report.diagnostic.binaryBefore=binaryBefore;receipt('diagnostic-binary-before',binaryBefore)
@@ -563,8 +565,13 @@ async function execute(o){
    const deadline=createAttachDeadline(),startedAt=new Date().toISOString();report.diagnostic.appSpawnStartedAt=startedAt;save()
    try{
     const appStart=Date.now(),app=spawn(application,[],{cwd:root,env:appEnv,windowsHide:true,stdio:['ignore','pipe','pipe']});keep(app,attachAppLogs,application,appStart,Date.now());assert.ok(app.pid,'应用没有实际spawn PID')
-    const observed=processSnapshot(output,[...ports],[],Math.min(30000,deadline.remaining()));deadline.remaining();track(observed)
+    // R11另行显式打开；复用首snapshot，不加进程/CIM轮询，不把token证明加入kill集合。
+    const spawnProof=o['--observe-app-token']?attachOwnership.receipt().find(p=>p.pid===app.pid):null
+    const tokenRequest=spawnProof?{app:{pid:app.pid,exe:application,startedAt:spawnProof.startedAt,returnedAt:spawnProof.returnedAt},parent:{pid:process.pid,exe:process.execPath},expectedSid:proof.sid}:undefined
+    assert.ok(!o['--observe-app-token']||tokenRequest,'token观察缺本轮spawn身份')
+    const observed=processSnapshot(output,[...ports],[],Math.min(30000,deadline.remaining()),tokenRequest);deadline.remaining();track(observed)
     const appIdentity=attachOwnership.known().find(p=>p.pid===app.pid);assert.ok(appIdentity,'缺真实同SHA应用spawn窗口/PID/CreationDate')
+    if(tokenRequest){observed.tokenObservation=publicTokenObservation(observed.tokenObservation,tokenRequest);assert.equal(observed.tokenObservation.app.cimCreationUtc,appIdentity.creationDate,'token与本轮CIM出生不符');report.diagnostic.tokenObservation=observed.tokenObservation;receipt('attach-token-observation',observed.tokenObservation)}
     report.diagnostic.appIdentity=appIdentity;receipt('attach-app-identity',observed);save()
     let evidence
     for(;;){
@@ -728,5 +735,5 @@ async function execute(o){
  return report
 }
 if(process.argv[1]&&pathToFileURL(path.resolve(process.argv[1])).href===import.meta.url){
- try{const o=parseArgs(process.argv.slice(2));if(o['--execute'])await execute(o);else console.log(JSON.stringify({status:'not-run',localInstall:false,scope:o['--diagnostic-attach']?'diagnostic-attach':o['--scope']||'complete',diagnosticNeverQualifies:!!o['--diagnostic-attach'],candidateSha:o['--sha']||null,hosts:Object.keys(HOSTS),requiredCases:REQUIRED_CASES,phaseOneCases:PHASE_CASES,expectedArtifacts:Object.fromEntries(Object.keys(HOSTS).map(v=>[v,expectedArtifact(v)])),pendingNativeChecks:REQUIRED_CASES,expectedSurfaceLimit:'main-only surface must be proven by exact source and actual enumeration; never a passed wrong-window negative',legacyScannerLimit:'5.12 has no reviewed operator policy entry; real scanner rejection remains required for complete'}))}catch(e){console.error(redact(e.stack||String(e)));process.exitCode=1}
+ try{const o=parseArgs(process.argv.slice(2));if(o['--execute'])await execute(o);else console.log(JSON.stringify({status:'not-run',localInstall:false,scope:o['--diagnostic-attach']?'diagnostic-attach':o['--scope']||'complete',diagnosticNeverQualifies:!!o['--diagnostic-attach'],...(o['--observe-app-token']?{observeAppToken:true}:{}),candidateSha:o['--sha']||null,hosts:Object.keys(HOSTS),requiredCases:REQUIRED_CASES,phaseOneCases:PHASE_CASES,expectedArtifacts:Object.fromEntries(Object.keys(HOSTS).map(v=>[v,expectedArtifact(v)])),pendingNativeChecks:REQUIRED_CASES,expectedSurfaceLimit:'main-only surface must be proven by exact source and actual enumeration; never a passed wrong-window negative',legacyScannerLimit:'5.12 has no reviewed operator policy entry; real scanner rejection remains required for complete'}))}catch(e){console.error(redact(e.stack||String(e)));process.exitCode=1}
 }
