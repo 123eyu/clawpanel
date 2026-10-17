@@ -44,6 +44,8 @@ test('来源/字段/clock/顺序/PID/父链/闭合/重复JSON/预算坏材料逐
   for (const mutate of mutations) { const rows = input(); mutate(rows); assert.throws(() => m.decodeStatusTailObservation(stderr(rows), { rootPid: 101 }), /STATUS_TAIL_/) }
   for (const text of [stderr().replace('"event":"return"', '"event":"raise","event":"return"'), stderr().replace(phase(102, 101, 'entry'), ''), stderr().replace(phase(103, 102, 'main_b'), ''), stderr().replace(phase(103, 102, 'main_exit'), ''), stderr() + prefix + ' '.repeat(1025) + '\n', 'x'.repeat(1048577), prefix + '{"bad":true}']) assert.throws(() => m.decodeStatusTailObservation(text, { rootPid: 101 }), /STATUS_TAIL_/)
   assert.throws(() => m.decodeStatusTailObservation(stderr(), { rootPid: 999 }), /STATUS_TAIL_/)
+  // JSON.parse会覆盖转义拼写的重复key；原始协议必须连相同值也拒绝。
+  assert.throws(() => m.decodeStatusTailObservation(stderr().replaceAll('"pid":103', '"pid":103,"p\\u0069d":103'), { rootPid: 101 }), /STATUS_TAIL_/)
 })
 
 test('真实自有execFile stderr收据与close，完整tail也不把原CLI失败改绿', async () => {

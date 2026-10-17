@@ -37,7 +37,7 @@ export function decodeStatusTailObservation(input, { rootPid } = {}) {
     try { row = JSON.parse(raw) } catch { fail('EVENT_JSON') }
     if (!row || Array.isArray(row) || typeof row !== 'object' || Object.keys(row).length !== fields.length || !fields.every(key => Object.hasOwn(row, key))) fail('FIELDS')
     // 值均限定为原始标量；原始key计数同时拒绝重复或转义key，不接受JSON覆盖语义。
-    const keys = [...raw.matchAll(/(?:^\s*\{|,)\s*"([A-Za-z][A-Za-z0-9]*)"\s*:/g)].map(match => match[1])
+    const keys = [...raw.matchAll(/(?:^\s*\{|,)\s*"((?:\\.|[^"\\])*)"\s*:/g)].map(match => match[1])
     if (keys.length !== fields.length || new Set(keys).size !== fields.length || !keys.every(key => fields.includes(key))) fail('DUPLICATE_OR_ESCAPED_KEY')
     if (row.schemaVersion !== 1 || row.scope !== 'hermes-status-tail-diagnostic' || row.moduleSha256 !== moduleSha) fail('SOURCE')
     if (!integer(row.pid) || !integer(row.ppid) || row.sequence !== rows.length + 1) fail('IDENTITY_OR_SEQUENCE')
