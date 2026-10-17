@@ -286,21 +286,24 @@ export function matchesPinnedTitleRequest(body, evidence) {
   }
   if (!evidence || evidence.method !== 'POST' || evidence.path !== '/v1/chat/completions' || evidence.authenticated !== true || !['f97608f178d1ffeca59860195ab7da295f7c8e5f', 'd923a5eb487a17c0a68801bba9ef0f56c81040a8'].includes(evidence.pin)) return false
   const family = evidence.nonceFamily === undefined ? 'web' : evidence.nonceFamily
-  if (!['web', 'native'].includes(family)) return false
-  const noncePattern = family === 'native' ? /^native-acceptance-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/ : /^hq-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
+  if (!['web', 'native', 'native-web-compat'].includes(family)) return false
+  const noncePattern = family === 'web' ? /^hq-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/ : /^native-acceptance-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
   if (!record(body, ['messages', 'model', 'reasoning_effort', 'response_format']) || !Array.isArray(evidence.models) || !evidence.models.includes(body.model) || !Array.isArray(evidence.calls)) return false
   if (!Array.isArray(body.messages) || body.messages.length !== 2 || Reflect.ownKeys(body.messages).length !== 3 || !body.messages.every(m => record(m, ['role', 'content']))) return false
   const [system, user] = body.messages
-  if (system.role !== 'system' || typeof system.content !== 'string' || crypto.createHash('sha256').update(system.content).digest('hex') !== '3f1eef0616ddd2c13d45a3f8cef4ed648dadfdacdba7fbedceebf5a04d549998' || user.role !== 'user' || typeof user.content !== 'string' || !noncePattern.test(user.content)) return false
+  const nonce = family === 'native-web-compat' ? evidence.nonce : user.content
+  if (system.role !== 'system' || typeof system.content !== 'string' || crypto.createHash('sha256').update(system.content).digest('hex') !== '3f1eef0616ddd2c13d45a3f8cef4ed648dadfdacdba7fbedceebf5a04d549998' || user.role !== 'user' || typeof user.content !== 'string' || typeof nonce !== 'string' || !noncePattern.test(nonce)) return false
+  if (family === 'native-web-compat' && (evidence.pin !== 'f97608f178d1ffeca59860195ab7da295f7c8e5f' || user.content !== `Unicode 中文 🦀 café é ${nonce}`)) return false
   const format = { type: 'json_schema', json_schema: { name: 'session_title', strict: true, schema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false } } }
   if (body.reasoning_effort !== 'none' || !exact(body.response_format, format)) return false
-  const prior = evidence.calls.filter(c => c.purpose === 'chat' && c.authenticated === true && c.stream === true && c.nonce === user.content && c.model === body.model)
-  return prior.length === 1 && !evidence.calls.some(c => c.purpose === 'title' && c.nonce === user.content)
+  const prior = evidence.calls.filter(c => c.purpose === 'chat' && c.authenticated === true && c.stream === true && c.nonce === nonce && c.model === body.model)
+  return prior.length === 1 && (family !== 'native-web-compat' || prior[0].openingMessageSha256 === crypto.createHash('sha256').update(user.content).digest('hex')) && !evidence.calls.some(c => c.purpose === 'title' && c.nonce === nonce)
 }
 
 // 仅精确已核strict标题合同返回JSON content；其余路径保持原响应文本。
 export function qualificationProviderReply(body, nonce, evidence = null) {
-  if (matchesPinnedTitleRequest(body, evidence) && nonce === body.messages[1].content) return JSON.stringify({ title: `Hermes qualification ${nonce} ${body.model}` })
+  const input = evidence?.nonceFamily === 'native-web-compat' ? `Unicode 中文 🦀 café é ${nonce}` : nonce
+  if (matchesPinnedTitleRequest(body, evidence) && input === body.messages[1].content) return JSON.stringify({ title: `Hermes qualification ${nonce} ${body.model}` })
   return `Hermes qualification reply ${nonce} ${body.model}.`
 }
 

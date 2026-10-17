@@ -668,3 +668,34 @@ test('native标题接线：runtime实际pin与compat旧pin显式传入且复用�
   assert.match(source, /scripts\/test-hermes-windows-qualification\.mjs/)
   assert.doesNotMatch(source, /!\w+\.title\s*\?\s*['"]chat|title\s*\?\s*['"]title['"]\s*:\s*['"]chat/)
 })
+
+test('Native原legacy HTTP语义：不继承两Web前缀，不trim；未知仍触发原nonTitle计数红灯', { timeout: 30000 }, async t => {
+  const { createNativeProvider } = await load(), out = process.env.HERMES_NATIVE_PREFIX_EVIDENCE_DIR || fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'hermes-native-prefix-'))
+  fs.mkdirSync(out, { recursive: true }); const proof = { scope: 'controlled own factory HTTP scope regression; NOT actual Native VM observation', observations: [], ownedServersClosed: 0 }
+  try {
+    for (const [kind, system, expectedTitle] of [
+      ['native-original', 'You are a title generator. Keep original Native behavior.', true],
+      ['web-coding-only', 'Create a concise title for an AI coding-assistant session', false],
+      ['web-conversation-only', 'You generate concise chat titles', false],
+      ['native-leading-whitespace', ' You are a title generator. Leading space was not Native title.', false],
+    ]) {
+      const report = { provider: [], metadata: [] }, nonce = 'native-acceptance-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', model = 'native-one', server = await createNativeProvider({ report, runtimePin: nativeTitleFixture.upstream[0].pin })
+      await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+      try {
+        const request = async body => { const raw = JSON.stringify(body), response = await fetch(`http://127.0.0.1:${server.address().port}/v1/chat/completions`, { method: 'POST', headers: { authorization: 'Bearer qualification-native-no-secret', 'content-type': 'application/json' }, body: raw, signal: AbortSignal.timeout(5000) }); return { status: response.status, text: await response.text(), bodySha256: crypto.createHash('sha256').update(raw).digest('hex') } }
+        assert.equal((await request(nativeChatBody(nonce, model))).status, 200)
+        const response = await request({ model, messages: [{ role: 'system', content: system }, { role: 'user', content: nonce }] })
+        proof.observations.push({ kind, system, expectedTitle, status: response.status, content: JSON.parse(response.text).choices[0].message.content, bodySha256: response.bodySha256, rows: structuredClone(report.provider), nonTitle: report.provider.filter(c => !c.title && c.authenticated && c.nonce === nonce && c.model === model).length, expectedNonTitle: expectedTitle ? 1 : 2, chinese: `原生完整回复：${nonce}；模型：${model}。` })
+      } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); assert.equal(server.listening, false); proof.ownedServersClosed++ }
+    }
+    for (const row of proof.observations) {
+      assert.equal(row.status, 200); assert.equal(row.content, row.chinese); assert.equal(row.rows[0].purpose, 'chat')
+      assert.equal(row.rows[1].title, row.expectedTitle, row.kind + '不得扩大Native原legacy范围')
+      assert.equal(row.rows[1].purpose, row.expectedTitle ? 'title' : 'unattributed', 'unknown不能由!title补chat')
+      assert.equal(row.nonTitle, row.expectedNonTitle)
+      if (!row.expectedTitle) assert.throws(() => assert.equal(row.nonTitle, 1), /2 !== 1/, '原恰好一次计数必须对额外未知请求保持红灯')
+    }
+    proof.passed = true
+  } catch (error) { proof.passed = false; proof.error = String(error); throw error }
+  finally { fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(proof, null, 2) + '\n', { flag: 'wx' }); t.diagnostic('Native original-prefix HTTP: ' + out) }
+})

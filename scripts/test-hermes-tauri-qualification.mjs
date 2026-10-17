@@ -352,7 +352,7 @@ export function assertNativeCompatibilityComplete(r) {
   assertNativeUiComplete(r)
 }
 
-export async function createNativeProvider({ report, save = () => {}, runtimePin: providerPin }) {
+export async function createNativeProvider({ report, save = () => {}, runtimePin: providerPin, nonceFamily }) {
   const { classifyHermesMetadataRequest } = await import('./hermes-qualification-provider.mjs')
   const models = ['native-one', 'native-two']
   report.metadata ||= []
@@ -376,10 +376,17 @@ export async function createNativeProvider({ report, save = () => {}, runtimePin
       const nonce = [...JSON.stringify(body.messages).matchAll(/native-acceptance-[a-f0-9-]{36}/g)].at(-1)?.[0]
       assert.ok(nonce, '模型请求缺少本轮 nonce')
       // 只以真实已分类且同端点POST的历史作证；title:false不等于已核chat。
-      const evidence = { nonceFamily: 'native', pin: providerPin, method: req.method, path: req.url, authenticated: true, models, calls: report.provider.filter(c => c.method === 'POST' && c.path === '/v1/chat/completions') }
-      const purpose = classifyProviderRequest(body, evidence), title = purpose === 'title'
-      const content = matchesPinnedTitleRequest(body, evidence) ? qualificationProviderReply(body, nonce, evidence) : `原生完整回复：${nonce}；模型：${body.model}。`
-      report.provider.push({ nonce, model: body.model, title, purpose, stream: body.stream, authenticated: true, method: req.method, path: req.url }); save()
+      const family = nonceFamily === undefined ? { nonceFamily: 'native' } : { nonceFamily }
+      const evidence = { ...family, nonce, pin: providerPin, method: req.method, path: req.url, authenticated: true, models, calls: report.provider.filter(c => c.method === 'POST' && c.path === '/v1/chat/completions') }
+      const classified = classifyProviderRequest(body, evidence), pinnedTitle = matchesPinnedTitleRequest(body, evidence)
+      // 原Native只认这一种raw前缀（不trim）；共享Web另外两种legacy不得改变原计数。
+      const system = (body.messages || []).filter(m => m.role === 'system').map(m => m.content).join('\n')
+      const title = /^You are a title generator\./.test(system) || pinnedTitle
+      const purpose = title ? 'title' : classified === 'chat' ? 'chat' : 'unattributed'
+      const content = pinnedTitle ? qualificationProviderReply(body, nonce, evidence) : `原生完整回复：${nonce}；模型：${body.model}。`
+      // Web兼容输入只记实际最后user文本的hash；不能从nonce或title布尔值补造正文证据。
+      const openingMessage = nonceFamily === 'native-web-compat' && Array.isArray(body.messages) ? body.messages.filter(m => m.role === 'user').at(-1)?.content : null
+      report.provider.push({ nonce, model: body.model, title, purpose, stream: body.stream, authenticated: true, method: req.method, path: req.url, ...(nonceFamily === 'native-web-compat' ? { openingMessageSha256: typeof openingMessage === 'string' ? sha256(openingMessage) : null } : {}) }); save()
       if (body.stream) {
         res.writeHead(200, { 'content-type': 'text/event-stream' })
         for (const delta of [{ role: 'assistant', content: '' }, { content }, {}]) res.write('data: ' + JSON.stringify({ id: 'native-qualification', object: 'chat.completion.chunk', model: body.model, choices: [{ index: 0, delta, finish_reason: Object.keys(delta).length ? null : 'stop' }] }) + '\n\n')
