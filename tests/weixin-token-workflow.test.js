@@ -133,7 +133,7 @@ const original = {
 }
 const baselineHashes = {
   "tests/weixin-attach-workflow.test.js": "a5a72d116fb34134e20c93dbf8a22d850d57cb935450ebd86c55cb87273d5baa",
-  "scripts/test-weixin-windows-qualification.mjs": "c894850433f84ecd30980da68b18f25e23f49fee50675cf351de627fc734cacf",
+  "scripts/test-weixin-windows-qualification.mjs": "1dc63c07b0648cd77dabe9e68d58c5cc5c95858bd82fd33acadb27fefd70116b",
   "scripts/weixin-native-token-observation.mjs": "9814365ca67d450552663fdbf398689825eff2891e66f27185464ced4d379665",
   "tests/weixin-native-token-observation.test.js": "f57d8a4bca117f16a09d8c62270503017293125553356251dc025214b721d2bf"
 }
