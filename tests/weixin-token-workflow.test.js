@@ -13,7 +13,8 @@ import { parse } from 'yaml'
 
 const file = new URL('../.github/workflows/weixin-qualification.yml', import.meta.url)
 const workflow = parse(fs.readFileSync(file, 'utf8')), job = workflow.jobs.native
-// 原80eef workflow语义及四文件SHA冻结在测试内；CI不读取历史Git对象、网络或额外fixture。
+// 原80eef workflow/生产两文件/旧workflow测试冻结；token测试SHA仅同步获批ddf基线内置修正。
+// CI不读取历史Git对象、网络或额外fixture。
 const original = {
   "name": "Manual Weixin Native Qualification",
   "on": {
@@ -134,7 +135,7 @@ const baselineHashes = {
   "tests/weixin-attach-workflow.test.js": "a5a72d116fb34134e20c93dbf8a22d850d57cb935450ebd86c55cb87273d5baa",
   "scripts/test-weixin-windows-qualification.mjs": "c894850433f84ecd30980da68b18f25e23f49fee50675cf351de627fc734cacf",
   "scripts/weixin-native-token-observation.mjs": "9814365ca67d450552663fdbf398689825eff2891e66f27185464ced4d379665",
-  "tests/weixin-native-token-observation.test.js": "36f18832e3333882efcf9f52f6df50d201729dea5554a3ae4aa49e375ccd8139"
+  "tests/weixin-native-token-observation.test.js": "f57d8a4bca117f16a09d8c62270503017293125553356251dc025214b721d2bf"
 }
 const select = w => ({ plan: w.jobs.native.steps.find(s => s.name?.startsWith('先检查完整SHA')), execute: w.jobs.native.steps.find(s => s.env?.QUALIFICATION_SCOPE), summary: w.jobs.native.steps.find(s => s.if === 'always()' && s.run) })
 const steps = select(workflow), oldSteps = select(original)

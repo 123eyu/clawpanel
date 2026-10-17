@@ -2,11 +2,39 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import crypto from 'node:crypto'
 import path from 'node:path'
 import os from 'node:os'
 import { once } from 'node:events'
 import { spawn, spawnSync } from 'node:child_process'
 import { parseArgs, processObservationSource, createAttachDeadline } from '../scripts/test-weixin-windows-qualification.mjs'
+// 原ddf固定源码只冻结原断言使用的三段；仅作为数据比较，不执行、不读Git/网络。
+const frozenDdfBaseline = {
+  "schemaVersion": 1,
+  "ref": "ddf9451c5888fbd7b1db2f0bf5c968883a9a3d36",
+  "path": "scripts/test-weixin-windows-qualification.mjs",
+  "sourceSha256": "72f505debeba23b328a74c1871622ef0ac6266e37b7d9e3f2dda2326d5a918db",
+  "sourceBytes": 121416,
+  "gitBlob": "474e4f0be2e3e71b03ded1176fe0227435216897",
+  "sections": {
+    "snapshot": {
+      "bytes": 1535,
+      "sha256": "ae588e7a4ead96f83d8cc59231cc0d6b77bd93bfc09278f6ac782f43f74b8ace",
+      "text": "export function processObservationSource(root,ports,tracked=[],controllerPid=process.pid){\n assert.ok(Number.isInteger(controllerPid)&&controllerPid>0&&ports.every(p=>Number.isInteger(p)&&p>0&&p<65536)&&tracked.every(p=>Number.isInteger(p.pid)&&p.pid>0))\n return `$h=${psValue(root)};$ports=@(${ports.join(',')});$ids=@(${tracked.map(x=>x.pid).join(',')});$all=@(Get-CimInstance Win32_Process -ErrorAction Stop);$owned=@($all|Where-Object {$_.ProcessId -ne $PID -and $_.ProcessId -ne ${controllerPid} -and (($_.ExecutablePath -and $_.ExecutablePath.StartsWith($h+'\\\\',[StringComparison]::OrdinalIgnoreCase)) -or ($_.CommandLine -and $_.CommandLine.IndexOf($h+'\\\\',[StringComparison]::OrdinalIgnoreCase) -ge 0))});function Row($p){if(!$p -or !$p.CreationDate){throw 'Missing CreationDate'};@{pid=[int]$p.ProcessId;creationDate=$p.CreationDate.ToUniversalTime().ToString('o');exe=$p.ExecutablePath;commandLine=$(if($owned.ProcessId -contains $p.ProcessId){$p.CommandLine}else{$null})}};$listeners=@(Get-NetTCPConnection -ErrorAction Stop|Where-Object {$_.State -eq 'Listen' -and ($ports -contains [int]$_.LocalPort -or $owned.ProcessId -contains [int]$_.OwningProcess)}|ForEach-Object {$c=$_;$p=$all|Where-Object {$_.ProcessId -eq $c.OwningProcess}|Select-Object -First 1;$r=Row $p;$r.port=[int]$c.LocalPort;$r.localAddress=$c.LocalAddress;$r});@{processes=@($owned|ForEach-Object {Row $_});present=@($all|Where-Object {$ids -contains [int]$_.ProcessId}|ForEach-Object {Row $_});listeners=$listeners}|ConvertTo-Json -Compress -Depth 6`\n}"
+    },
+    "complete": {
+      "bytes": 2308,
+      "sha256": "d446c65fa673d925e6e4526a19d29921667aa28a1554db2cd20bf5ef99dac3ae",
+      "text": "export function assertNativeComplete(r){\n assert.equal(r.status,'pass-native');assert.equal(r.scope,'complete');assert.equal(r.executionMode,'actual-github-hosted-windows-vm-weixin');validateRunnerProof(r.runner)\n assert.ok(exactSha(r.candidateSha)&&Object.hasOwn(HOSTS,r.hostVersion));assert.equal(r.source.sha,r.candidateSha);assert.equal(r.build.sha,r.candidateSha);assert.equal(r.build.noBundle,true)\n assert.deepEqual(r.artifact,expectedArtifact(r.hostVersion),'报告artifact与精确host不符')\n for(const binding of [r.source,r.tooling]){assert.ok(Object.keys(binding.before).length);for(const v of Object.values(binding.before))assert.ok(validHash(v.sha256)&&exactSha(v.gitBlob));assert.deepEqual(binding.after,binding.before,'源码/tooling哈希漂移')}\n assert.equal(r.tooling.sha,r.runner.toolingSha);assert.ok(validHash(r.build.exeSha256));assert.ok(Object.keys(r.build.dist).length&&Object.values(r.build.dist).every(validHash))\n assert.equal(debugPath(r.webviewDebugger.runtimePath),debugPath(r.drivers.edge.runtime.path));assert.equal(debugPath(r.webviewDebugger.metadata.userDataFolder),debugPath(r.sessionLaunch.envUserDataFolder));assertWebviewDebugger(r.webviewDebugger);assertWebviewDebuggerClosed(r.webviewDebugger,r.cleanup.webviewDebugger?.observation);assert.ok(r.cleanup.ports.includes(r.webviewDebugger.port));assert.ok(!r.debuggerGap,'存在未闭合debugger边界缺口');\n assertTauriDriverEvidence(r.drivers.tauri,r.drivers.edge,r.build.application);assert.match(r.drivers.edge.version,/^\\d+\\.\\d+\\.\\d+\\.\\d+$/);assert.equal(r.drivers.edge.version,r.drivers.edge.runtimeVersion);assert.ok(validHash(r.drivers.edge.sha256))\n assert.deepEqual(r.cases.map(x=>x.id).sort(),[...REQUIRED_CASES].sort())\n for(const c of r.cases){assert.equal(c.status,'passed',c.id);assert.equal(c.evidenceKind,'actual-native');assert.ok(c.receipts?.length&&c.receipts.every(validHash),c.id+'缺真实回执')}\n assert.deepEqual(r.gaps,[]);assert.deepEqual(r.errors,[]);assert.equal(r.cleanup.hostUnchanged,true);assert.deepEqual(r.cleanup.errors,[]);assert.deepEqual(r.cleanup.processes,[]);assert.deepEqual(r.cleanup.listeners,[]);assert.ok(r.cleanup.identities?.length)\n for(const p of r.cleanup.identities)assert.ok(Number.isInteger(p.pid)&&p.pid>0&&Number.isFinite(Date.parse(p.creationDate)))\n}"
+    },
+    "cleanup": {
+      "bytes": 1359,
+      "sha256": "1fb58b8dcdb405c26150793e8dfcf13889b0f6e025ccbe7aef20a2d2c41808f7",
+      "text": "  try{const snap=processSnapshot(output,[...ports]);receipt('processes-before-cleanup',snap);for(const p of snap.processes)identities.set(`${p.pid}:${p.creationDate}`,p);for(const pid of pending){if(![...identities.values()].some(x=>x.pid===pid)){const r=ps(`$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}';if($p){@{pid=[int]$p.ProcessId;creationDate=$p.CreationDate.ToUniversalTime().ToString('o');exe=$p.ExecutablePath}|ConvertTo-Json}else{'null'}`);const p=JSON.parse(r);if(p)identities.set(`${p.pid}:${p.creationDate}`,p)}}\n   assert.ok(identities.size,'清理身份集合为空');for(const p of identities.values()){const current=processSnapshot(output,[],[p]).present.find(x=>x.pid===p.pid&&x.creationDate===p.creationDate);if(current)spawnSync('taskkill.exe',['/PID',String(p.pid),'/T','/F'],{windowsHide:true,timeout:30000})}\n   let after;await until(async()=>{after=processSnapshot(output,[...ports],[...identities.values()]);return !after.processes.length&&!after.listeners.length&&!after.present.some(x=>identities.has(`${x.pid}:${x.creationDate}`))},30000)\n   Object.assign(report.cleanup,{processes:after.processes,listeners:after.listeners,identities:[...identities.values()],ports:[...ports]});receipt('processes-after-cleanup',after)\n  }catch(e){report.cleanup.errors.push('PID/CreationDate/port cleanup: '+redact(String(e)))}\n  }\n"
+    }
+  }
+}
+// 固定基线结束：全文SHA是来源证明，三段逐一严格校验字节数及SHA。
 let m = {}
 try { m = await import('../scripts/weixin-native-token-observation.mjs') } catch (e) { if (e.code !== 'ERR_MODULE_NOT_FOUND') throw e }
 const artifact = (name, data) => {
@@ -127,12 +155,16 @@ test('真实Win32 E2E：仅自有Node app+parent，先CIM owner参考，再原�
   artifact('actual-win32-own-node', { scope: 'actual readonly Win32 of exclusively owned Node parent/child; not app/VM/native acceptance', proof: data, negativeResults: failures, noGUI: true, noTokenMutationOrLaunch: true })
 })
 test('实际snapshot预算/白名单/原55和15以及正式cleanup不扩改', () => {
-  const source = fs.readFileSync(new URL('../scripts/test-weixin-windows-qualification.mjs', import.meta.url), 'utf8'), base = spawnSync('git', ['show', 'ddf9451c5888fbd7b1db2f0bf5c968883a9a3d36:scripts/test-weixin-windows-qualification.mjs'], { windowsHide: true, encoding: 'utf8', timeout: 10000 })
-  assert.equal(base.status, 0)
+  const source = fs.readFileSync(new URL('../scripts/test-weixin-windows-qualification.mjs', import.meta.url), 'utf8')
+  for (const section of Object.values(frozenDdfBaseline.sections)) {
+    const bytes = Buffer.from(section.text, 'utf8')
+    assert.equal(bytes.length, section.bytes)
+    assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), section.sha256)
+  }
   const take = (s, a, b) => s.slice(s.indexOf(a), s.indexOf(b, s.indexOf(a)))
-  assert.equal(take(source, 'export function processObservationSource(', '\nfunction processSnapshot('), take(base.stdout, 'export function processObservationSource(', '\nfunction processSnapshot('))
-  assert.equal(take(source, 'export function assertNativeComplete(', '\nfunction tarEntries('), take(base.stdout, 'export function assertNativeComplete(', '\nfunction tarEntries('))
-  const formal = take(base.stdout, '  try{const snap=processSnapshot(output,[...ports]);', '  try{if(report.sessionLaunch)'); assert.ok(source.includes(formal))
+  assert.equal(take(source, 'export function processObservationSource(', '\nfunction processSnapshot('), frozenDdfBaseline.sections.snapshot.text)
+  assert.equal(take(source, 'export function assertNativeComplete(', '\nfunction tarEntries('), frozenDdfBaseline.sections.complete.text)
+  const formal = frozenDdfBaseline.sections.cleanup.text; assert.ok(source.includes(formal))
   assert.ok(source.includes('--observe-app-token')); assert.ok(source.includes('tokenObservation')); assert.ok(/Math\.min\(30000,deadline\.remaining\(\)\)/.test(source))
   assert.match(source, /maxBuffer:16\*1024\*1024/); assert.match(source, /limitMs=60000/)
   assert.throws(() => createAttachDeadline(60001)); assert.doesNotMatch(source, /CreateProcessWithToken|CreateRestrictedToken|AdjustTokenPrivileges/)
