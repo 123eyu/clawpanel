@@ -133,9 +133,9 @@ const original = {
 }
 const baselineHashes = {
   "tests/weixin-attach-workflow.test.js": "a5a72d116fb34134e20c93dbf8a22d850d57cb935450ebd86c55cb87273d5baa",
-  "scripts/test-weixin-windows-qualification.mjs": "1dc63c07b0648cd77dabe9e68d58c5cc5c95858bd82fd33acadb27fefd70116b",
+  "scripts/test-weixin-windows-qualification.mjs": "7775c9077909c171299010711c903755e502b8dcf0466c00e2e097237cac08e8",
   "scripts/weixin-native-token-observation.mjs": "9814365ca67d450552663fdbf398689825eff2891e66f27185464ced4d379665",
-  "tests/weixin-native-token-observation.test.js": "f57d8a4bca117f16a09d8c62270503017293125553356251dc025214b721d2bf"
+  "tests/weixin-native-token-observation.test.js": "f5ad5ce02923de73617a5f58489f740390faadf5427d3a26f0529ca421a1472a"
 }
 const select = w => ({ plan: w.jobs.native.steps.find(s => s.name?.startsWith('先检查完整SHA')), execute: w.jobs.native.steps.find(s => s.env?.QUALIFICATION_SCOPE), summary: w.jobs.native.steps.find(s => s.if === 'always()' && s.run) })
 const steps = select(workflow), oldSteps = select(original)

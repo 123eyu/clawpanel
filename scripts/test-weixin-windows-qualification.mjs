@@ -478,12 +478,12 @@ function hostExtra(profile){
  const home=path.join(profile,'.openclaw');result.actualOpenclawHome=fs.existsSync(home)?directoryHashes(home):'absent';return result
 }
 async function execute(o){
+ for(const key of ['--root','--sha','--host','--output'])assert.ok(typeof o[key]==='string'&&o[key].trim(),'缺少 '+key)
  validateInjectionSyntax()
  // 这两项平台事实在任何目录创建、下载或候选执行之前检查；没有本机执行开关。
  assert.ok(process.platform==='win32'&&process.env.GITHUB_ACTIONS==='true'&&process.env.RUNNER_ENVIRONMENT==='github-hosted','Windows GitHub-hosted VM only; no local install/GUI')
  const shared=await import('./test-hermes-windows-qualification.mjs')
  const proof=shared.actualRunnerProof();validateRunnerProof(proof)
- for(const key of ['--root','--sha','--host','--output'])assert.ok(o[key],'缺少 '+key)
  const candidate=physical(o['--root']),output=physical(o['--output']),tempRoot=physical(process.env.RUNNER_TEMP)
  assert.ok(inside(tempRoot,output)&&!fs.existsSync(output),'输出必须RUNNER_TEMP全新physical目录')
  fs.mkdirSync(output);const pub=path.join(output,'public');fs.mkdirSync(pub)

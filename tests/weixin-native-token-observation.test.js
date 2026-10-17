@@ -143,7 +143,14 @@ test('真实Win32 E2E：仅自有Node app+parent，先CIM owner参考，再原�
     ['wrong-parent', s => { s.parent.pid = own.app.pid + 1000000 }, 'TOKEN_PARENT_OWNER'],
     ['adjacent-CIM-microsecond', () => {}, 'TOKEN_BIRTH_MISMATCH', `$all[0].CreationDate=$all[0].CreationDate.AddTicks(-10);`],
     ['own-token-open-denied', () => {}, 'TOKEN_NATIVE_OpenProcessToken:5', null, s => s.replace('OpenProcessToken($hp,0x8,', 'OpenProcessToken($hp,0x0,')],
-    ['linked-query-unknown', () => {}, 'TOKEN_BUFFER_SIZE:9999:87', null, s => s.replace('$TokenLinkedToken=19', '$TokenLinkedToken=9999')],
+    ['invalid-token-class-after-SID', () => {}, 'TOKEN_BUFFER_SIZE:9999:87', null, s => {
+      // 不依赖Default/Full/Limited分支；在自有真实token已验SID后必经Query错误路径。
+      const checked = "$user=SidValue $ht 1;if($user -cne $sid){throw 'TOKEN_SID_MISMATCH'}"
+      assert.equal(s.split(checked).length, 2, 'SID验证锚点必须唯一')
+      const forced = s.replace(checked, () => checked + ';$null=Query $ht 9999')
+      assert.ok(forced.indexOf('$null=Query $ht 9999') < forced.indexOf('$et=Scalar $ht 18'))
+      return forced
+    }],
   ]) {
     const s = structuredClone(request); change(s)
     // 只在fixture复制的own CIM对象里改预期birth；原生目标仍限两个own PID。

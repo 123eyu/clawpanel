@@ -47,6 +47,7 @@ test('真实metadata/plan入口在token缺失、语法坏、求值抛错时均�
       assert.equal(r.status === 0, flags[0] === '--plan', r.stderr)
       assert.doesNotMatch(r.stderr, /TOKEN_LOADED|TOKEN_RESOLVED|Unexpected token|ERR_MODULE_NOT_FOUND/)
       if (flags[0] === '--plan') assert.equal(JSON.parse(r.stdout).status, 'not-run')
+      else assert.match(r.stderr, /缺少 --root/, '缺参必须在任何runner import/探针前确定拒绝')
     }
     rows.push({ name, metadata: actual.version, dependencyResolved: false, localExecuteGateRetained: true })
   }
@@ -102,6 +103,8 @@ test('同源loader仅显式execute+observe且runner/全Gitblob绑定成功才真
 test('真实execute调用次序：runner/source全Git绑定先于loader，source与public投影用同一module', () => {
   for (const match of source.matchAll(/^import .*?from ['"]([^'"]+)['"]/gm)) assert.ok(match[1].startsWith('node:'))
   const start = source.indexOf('async function execute('), before = source.indexOf('before:gitSnapshot(candidate', start), load = source.indexOf('tokenObservationModule=await loadTokenObservation(', start)
+  const required = source.indexOf("for(const key of ['--root','--sha','--host','--output'])", start)
+  assert.ok(required > start && required < source.indexOf('validateInjectionSyntax()', start) && required < source.indexOf('const shared=await import(', start), '必需参数在任何执行探针之前')
   assert.ok(source.indexOf('validateRunnerProof(proof)', start) < before && before > start && load > before)
   assert.match(source.slice(before, load), /if\(o\['--observe-app-token'\]\)/)
   assert.match(source, /tokenObservationModule\.publicTokenObservation\(observed\.tokenObservation,tokenRequest\)/)
