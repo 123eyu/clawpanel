@@ -3,7 +3,7 @@ use rand::RngCore;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -103,7 +103,7 @@ fn spawn_bridge(root: PathBuf) -> Result<PiBridge, String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let mut command = Command::new("node");
+    let mut command = crate::utils::background_command("node");
     command
         .arg(node_path(&source_path))
         .env("PATH", super::enhanced_path())
@@ -347,7 +347,7 @@ mod tests {
             "process.stdout.write('owned-partial-without-newline');\nprocess.stderr.write('fixture-token='+process.env.CLAWPANEL_PI_TOKEN+'\\n');\nAtomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);\n",
         )
         .unwrap();
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        let mut command = crate::utils::background_command(std::env::current_exe().unwrap());
         command.args([
             "--exact",
             "commands::pi::tests::bridge_startup_timeout_reports_owned_child_without_token_or_output",

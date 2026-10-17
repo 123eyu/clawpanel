@@ -11,6 +11,19 @@ export function isTauriRuntime() {
   return !!window.__TAURI_INTERNALS__ || !!window.__TAURI__ || window.location?.hostname === 'tauri.localhost'
 }
 
+/** 仅打开普通网页；桌面走既有shell能力，错误交给调用页显示。 */
+export async function openExternalUrl(url) {
+  const target = new URL(url)
+  if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) {
+    throw new Error(t('common.operationFailed'))
+  }
+  if (isTauriRuntime()) {
+    const { open } = await import('@tauri-apps/plugin-shell')
+    return open(target.href)
+  }
+  return window.open(target.href, '_blank', 'noopener,noreferrer')
+}
+
 let _tauriListenFn = null
 const _webChannelListeners = new Map()
 

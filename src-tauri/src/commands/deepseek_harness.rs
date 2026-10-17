@@ -258,7 +258,10 @@ fn node_compatible(version: &str) -> bool {
 
 fn find_command(name: &str) -> Option<PathBuf> {
     let output = if cfg!(windows) {
-        Command::new("where.exe").arg(name).output().ok()?
+        crate::utils::background_command("where.exe")
+            .arg(name)
+            .output()
+            .ok()?
     } else {
         Command::new("which").arg(name).output().ok()?
     };
@@ -280,7 +283,7 @@ fn node_program() -> Result<PathBuf, String> {
 fn node_version() -> String {
     node_program()
         .and_then(|node| {
-            Command::new(node)
+            crate::utils::background_command(node)
                 .arg("--version")
                 .env("PATH", super::enhanced_path())
                 .output()
@@ -313,7 +316,7 @@ fn read_pid_record() -> Option<Value> {
 
 fn process_alive(pid: u32) -> bool {
     if cfg!(windows) {
-        Command::new("tasklist.exe")
+        crate::utils::background_command("tasklist.exe")
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .output()
             .ok()
@@ -334,7 +337,7 @@ fn process_command_line(pid: u32) -> String {
         let script = format!(
             "(Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\" -ErrorAction SilentlyContinue).CommandLine"
         );
-        return Command::new("powershell.exe")
+        return crate::utils::background_command("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()
             .ok()
@@ -613,7 +616,7 @@ async fn run_install_command(runtime: PathBuf, channel: Option<&str>) -> Result<
     let (version, pnpm_version) = dsh_release(channel)?;
     let path = super::enhanced_path();
     let mut command = if cfg!(windows) {
-        let mut command = tokio::process::Command::new("cmd.exe");
+        let mut command = crate::utils::background_command_async("cmd.exe");
         command.args([
             "/D",
             "/S",
@@ -798,7 +801,7 @@ fn spawn_web(port: u16) -> Result<u32, String> {
             .and_then(|value| value.to_str())
             .is_some_and(|value| value.eq_ignore_ascii_case("cmd"))
     {
-        let mut command = Command::new("cmd.exe");
+        let mut command = crate::utils::background_command("cmd.exe");
         command.args(["/D", "/S", "/C"]);
         command.arg(&program);
         command
@@ -943,7 +946,7 @@ pub async fn dsh_stop(port: Option<u16>) -> Result<Value, String> {
         return Ok(current);
     };
     if cfg!(windows) {
-        let _ = Command::new("taskkill.exe")
+        let _ = crate::utils::background_command("taskkill.exe")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .output();
     } else {

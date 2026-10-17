@@ -127,7 +127,10 @@ fn find_managed_binary() -> Option<PathBuf> {
 
 fn find_command(name: &str) -> Option<PathBuf> {
     let output = if cfg!(windows) {
-        Command::new("where.exe").arg(name).output().ok()?
+        crate::utils::background_command("where.exe")
+            .arg(name)
+            .output()
+            .ok()?
     } else {
         Command::new("which").arg(name).output().ok()?
     };
@@ -271,7 +274,7 @@ fn read_pid_record() -> Option<Value> {
 
 fn process_alive(pid: u32) -> bool {
     if cfg!(windows) {
-        Command::new("tasklist.exe")
+        crate::utils::background_command("tasklist.exe")
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .output()
             .ok()
@@ -292,7 +295,7 @@ fn process_command_line(pid: u32) -> String {
         let script = format!(
             "(Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\" -ErrorAction SilentlyContinue).CommandLine"
         );
-        return Command::new("powershell.exe")
+        return crate::utils::background_command("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()
             .ok()
@@ -636,7 +639,7 @@ async fn run_install_at(
     let version = normalize_version(target_version)
         .ok_or_else(|| format!("OpenCode 目标版本无效: {target_version}"))?;
     let mut command = if cfg!(windows) {
-        let mut command = tokio::process::Command::new("cmd.exe");
+        let mut command = crate::utils::background_command_async("cmd.exe");
         command.args(["/D", "/S", "/C", "npm"]);
         command
     } else {
@@ -696,7 +699,7 @@ async fn prepare_staging(target_version: &str, registry: Option<&str>) -> Result
     run_install_at(&staging, target_version, registry).await?;
     let binary = find_managed_binary_at(&staging)
         .ok_or_else(|| "npm 安装完成，但未找到适用于当前平台的 OpenCode 二进制".to_string())?;
-    let probe = Command::new(&binary)
+    let probe = crate::utils::background_command(&binary)
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -913,7 +916,7 @@ fn spawn_server(port: u16) -> Result<u32, String> {
     let error_log = log
         .try_clone()
         .map_err(|error| format!("复制 OpenCode 日志句柄失败: {error}"))?;
-    let mut command = Command::new(&entry);
+    let mut command = crate::utils::background_command(&entry);
     command
         .args([
             "serve",
@@ -1012,7 +1015,7 @@ pub async fn opencode_stop(port: Option<u16>) -> Result<Value, String> {
         return Ok(current);
     };
     if cfg!(windows) {
-        let _ = Command::new("taskkill.exe")
+        let _ = crate::utils::background_command("taskkill.exe")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .output();
     } else {

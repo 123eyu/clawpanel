@@ -204,7 +204,7 @@ fn kill_gateway_pid() -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = std::process::Command::new("taskkill");
+        let mut cmd = crate::utils::background_command("taskkill");
         cmd.args(["/F", "/PID", &pid.to_string()]);
         cmd.creation_flags(CREATE_NO_WINDOW);
         let ok = cmd.output().map(|o| o.status.success()).unwrap_or(false);
@@ -802,7 +802,7 @@ async fn do_restart_gateway() -> Result<(), String> {
         .try_clone()
         .map_err(|e| format!("克隆日志句柄失败: {e}"))?;
 
-    let mut cmd = std::process::Command::new(hermes_program_for_spawn()?);
+    let mut cmd = crate::utils::background_command(hermes_program_for_spawn()?);
     cmd.args(["gateway", "run"])
         .current_dir(&home)
         .stdin(std::process::Stdio::null())
@@ -1331,7 +1331,7 @@ fn hermes_enhanced_path() -> String {
 /// 执行命令并获取 stdout（静默，无窗口）
 fn run_silent(program: &str, args: &[&str]) -> Result<String, String> {
     let enhanced = hermes_enhanced_path();
-    let mut cmd = Command::new(command_program(program)?);
+    let mut cmd = crate::utils::background_command(command_program(program)?);
     cmd.args(args);
     apply_hermes_runtime_env(&mut cmd, &enhanced);
     #[cfg(target_os = "windows")]
@@ -1347,7 +1347,7 @@ fn run_silent(program: &str, args: &[&str]) -> Result<String, String> {
 
 /// 在指定路径上执行命令
 fn run_at_path(program: &str, args: &[&str], path: &str) -> Result<String, String> {
-    let mut cmd = Command::new(command_program(program)?);
+    let mut cmd = crate::utils::background_command(command_program(program)?);
     cmd.args(args);
     apply_hermes_runtime_env(&mut cmd, path);
     #[cfg(target_os = "windows")]
@@ -1486,7 +1486,7 @@ pub fn check_python() -> Result<Value, String> {
 fn find_executable_path(name: &str, enhanced_path: &str) -> Option<String> {
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = Command::new("where");
+        let mut cmd = crate::utils::background_command("where");
         cmd.arg(name).env("PATH", enhanced_path);
         cmd.creation_flags(CREATE_NO_WINDOW);
         if let Ok(output) = cmd.output() {
@@ -1921,7 +1921,7 @@ fn kill_dashboard_pid() -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = std::process::Command::new("taskkill");
+        let mut cmd = crate::utils::background_command("taskkill");
         cmd.args(["/F", "/PID", &pid.to_string()]);
         cmd.creation_flags(CREATE_NO_WINDOW);
         let ok = cmd.output().map(|o| o.status.success()).unwrap_or(false);
@@ -1979,7 +1979,7 @@ pub async fn hermes_dashboard_start(app: tauri::AppHandle) -> Result<Value, Stri
         .map_err(|e| format!("克隆日志句柄失败: {e}"))?;
 
     let enhanced = hermes_enhanced_path();
-    let mut cmd = std::process::Command::new(hermes_program_for_spawn()?);
+    let mut cmd = crate::utils::background_command(hermes_program_for_spawn()?);
     cmd.args(["dashboard", "--no-open", "--port", &port.to_string()])
         .current_dir(&home)
         .stdin(std::process::Stdio::null())
@@ -2389,7 +2389,7 @@ fn hermes_uv_tool_root() -> Option<std::path::PathBuf> {
     } else {
         "uv".into()
     };
-    let mut cmd = std::process::Command::new(&uv_cmd);
+    let mut cmd = crate::utils::background_command(&uv_cmd);
     cmd.args(["tool", "dir"]);
     let enhanced = hermes_enhanced_path();
     apply_hermes_runtime_env(&mut cmd, &enhanced);
@@ -2636,7 +2636,7 @@ fn hermes_installer_sha256(bytes: &[u8]) -> String {
 
 fn run_hermes_source_git(args: &[&str]) -> Option<std::process::Output> {
     let enhanced = hermes_enhanced_path();
-    let mut cmd = Command::new(command_program("git").ok()?);
+    let mut cmd = crate::utils::background_command(command_program("git").ok()?);
     cmd.arg("-C").arg(hermes_source_dir()).args(args);
     apply_hermes_runtime_env(&mut cmd, &enhanced);
     #[cfg(target_os = "windows")]
@@ -2690,7 +2690,7 @@ async fn read_hermes_installer_via_git(
     }
 
     let enhanced = hermes_enhanced_path();
-    let mut clone = tokio::process::Command::new(command_program("git")?);
+    let mut clone = crate::utils::background_command_async(command_program("git")?);
     clone.args([
         "clone",
         "--quiet",
@@ -2724,7 +2724,7 @@ async fn read_hermes_installer_via_git(
             ));
         }
 
-        let mut show = tokio::process::Command::new(command_program("git")?);
+        let mut show = crate::utils::background_command_async(command_program("git")?);
         show.arg("-C")
             .arg(&checkout)
             .arg("show")
@@ -2863,7 +2863,7 @@ fn build_hermes_installer_stage_command(
 
     #[cfg(target_os = "windows")]
     let mut cmd = {
-        let mut command = tokio::process::Command::new("powershell.exe");
+        let mut command = crate::utils::background_command_async("powershell.exe");
         command
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
             .arg(wrapper_path)
@@ -14053,7 +14053,7 @@ async fn run_venv_python_json(script: &str) -> Result<Value, String> {
         "Hermes Python 解释器未找到（已尝试 HERMES_PYTHON、官方 source venv、~/.hermes-venv 与 uv tool 路径）。请先安装 Hermes。".to_string()
     })?;
 
-    let mut cmd = tokio::process::Command::new(&py);
+    let mut cmd = crate::utils::background_command_async(&py);
     cmd.arg("-c").arg(script);
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PATH", super::enhanced_path());
@@ -14483,7 +14483,7 @@ pub async fn hermes_gateway_action(
                     .try_clone()
                     .map_err(|e| format!("克隆日志句柄失败: {e}"))?;
 
-                let mut cmd = std::process::Command::new(hermes_program_for_spawn()?);
+                let mut cmd = crate::utils::background_command(hermes_program_for_spawn()?);
                 cmd.args(["gateway", "run"])
                     .current_dir(&home)
                     .stdin(std::process::Stdio::null())
@@ -14655,7 +14655,7 @@ pub async fn hermes_gateway_action(
             let killed = kill_gateway_pid();
 
             // 2. 尝试 hermes gateway stop（作为补充）
-            let mut cmd = tokio::process::Command::new(hermes_program_for_spawn()?);
+            let mut cmd = crate::utils::background_command_async(hermes_program_for_spawn()?);
             cmd.args(["gateway", "stop"]);
             apply_hermes_runtime_env_tokio(&mut cmd, &enhanced);
             #[cfg(target_os = "windows")]
@@ -14682,7 +14682,7 @@ pub async fn hermes_gateway_action(
             }
         }
         "status" => {
-            let mut cmd = tokio::process::Command::new(hermes_program_for_spawn()?);
+            let mut cmd = crate::utils::background_command_async(hermes_program_for_spawn()?);
             cmd.args(["gateway", "status"]);
             apply_hermes_runtime_env_tokio(&mut cmd, &enhanced);
             #[cfg(target_os = "windows")]
@@ -14692,7 +14692,7 @@ pub async fn hermes_gateway_action(
             Ok(stdout)
         }
         "install" => {
-            let mut cmd = tokio::process::Command::new(hermes_program_for_spawn()?);
+            let mut cmd = crate::utils::background_command_async(hermes_program_for_spawn()?);
             cmd.args(["gateway", "install"]);
             apply_hermes_runtime_env_tokio(&mut cmd, &enhanced);
             #[cfg(target_os = "windows")]
@@ -14705,7 +14705,7 @@ pub async fn hermes_gateway_action(
             }
         }
         "uninstall" => {
-            let mut cmd = tokio::process::Command::new(hermes_program_for_spawn()?);
+            let mut cmd = crate::utils::background_command_async(hermes_program_for_spawn()?);
             cmd.args(["gateway", "uninstall"]);
             apply_hermes_runtime_env_tokio(&mut cmd, &enhanced);
             #[cfg(target_os = "windows")]
@@ -14814,7 +14814,7 @@ pub async fn hermes_detect_environments() -> Result<Value, String> {
     #[cfg(target_os = "windows")]
     {
         // 1. 检测 WSL 是否安装
-        let wsl_check = std::process::Command::new("wsl")
+        let wsl_check = crate::utils::background_command("wsl")
             .args(["--list", "--quiet"])
             .creation_flags(CREATE_NO_WINDOW)
             .output();
@@ -14833,7 +14833,7 @@ pub async fn hermes_detect_environments() -> Result<Value, String> {
                     result["wsl2"]["distros"] = serde_json::json!(distros);
 
                     // 2. 获取默认 WSL2 IP
-                    let ip_cmd = std::process::Command::new("wsl")
+                    let ip_cmd = crate::utils::background_command("wsl")
                         .args(["-e", "hostname", "-I"])
                         .creation_flags(CREATE_NO_WINDOW)
                         .output();
@@ -14848,7 +14848,7 @@ pub async fn hermes_detect_environments() -> Result<Value, String> {
                     }
 
                     // 3. 检测 WSL 里是否安装了 hermes
-                    let hermes_check = std::process::Command::new("wsl")
+                    let hermes_check = crate::utils::background_command("wsl")
                         .args([
                             "-e",
                             "bash",
@@ -14891,7 +14891,7 @@ pub async fn hermes_detect_environments() -> Result<Value, String> {
     // --- Docker 检测（所有平台）---
     {
         let docker_check = {
-            let mut cmd = std::process::Command::new("docker");
+            let mut cmd = crate::utils::background_command("docker");
             cmd.args(["info", "--format", "{{.ServerVersion}}"]);
             #[cfg(target_os = "windows")]
             cmd.creation_flags(CREATE_NO_WINDOW);
@@ -14906,7 +14906,7 @@ pub async fn hermes_detect_environments() -> Result<Value, String> {
 
                 // 查找运行中的 hermes 相关容器
                 let ps_cmd = {
-                    let mut cmd = std::process::Command::new("docker");
+                    let mut cmd = crate::utils::background_command("docker");
                     cmd.args([
                         "ps",
                         "--format",
@@ -15070,7 +15070,7 @@ pub async fn uninstall_hermes(app: tauri::AppHandle, clean_config: bool) -> Resu
         };
 
         // uv tool uninstall
-        let mut cmd = tokio::process::Command::new(&uv);
+        let mut cmd = crate::utils::background_command_async(&uv);
         cmd.args(["tool", "uninstall", "hermes-agent"]);
         let _ = app.emit("hermes-install-log", "> uv tool uninstall hermes-agent");
         let enhanced = hermes_enhanced_path();
@@ -18353,7 +18353,7 @@ fn pid_is_alive(pid: u32) -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        let out = std::process::Command::new("tasklist")
+        let out = crate::utils::background_command("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .creation_flags(CREATE_NO_WINDOW)
             .output();
@@ -18530,7 +18530,7 @@ pub async fn hermes_multi_gateway_start(
         .try_clone()
         .map_err(|e| format!("克隆日志句柄失败: {e}"))?;
 
-    let mut cmd = std::process::Command::new(hermes_program_for_spawn()?);
+    let mut cmd = crate::utils::background_command(hermes_program_for_spawn()?);
     cmd.args(["--profile", &profile, "gateway", "run"])
         .current_dir(&home)
         .stdin(std::process::Stdio::null())
@@ -18608,7 +18608,7 @@ pub async fn hermes_multi_gateway_stop(name: String) -> Result<Value, String> {
     let pid = pid.unwrap();
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("taskkill")
+        let _ = crate::utils::background_command("taskkill")
             .args(["/F", "/PID", &pid.to_string()])
             .creation_flags(CREATE_NO_WINDOW)
             .output();

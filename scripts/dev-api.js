@@ -746,6 +746,7 @@ export function runHermesInstallCommand(program, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(program, args, {
       ...options,
+      windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -1688,6 +1689,7 @@ function spawnOpenclaw(args, options = {}) {
   const { env, ...rest } = options
   return spawn(spec.command, spec.args, {
     ...rest,
+    windowsHide: true,
     env: { ...process.env, ...(env || {}) },
   })
 }
@@ -1697,6 +1699,7 @@ function spawnOpenclawSync(args, options = {}) {
   const { env, ...rest } = options
   return spawnSync(spec.command, spec.args, {
     ...rest,
+    windowsHide: true,
     env: { ...process.env, ...(env || {}) },
   })
 }
@@ -2321,7 +2324,7 @@ async function _tryR2Install(version, source, logs) {
         : '/usr/local/lib/node_modules'
     } else {
       try {
-        const prefix = execSync('npm config get prefix', { encoding: 'utf8', timeout: 5000 }).trim()
+        const prefix = execSync('npm config get prefix', { encoding: 'utf8', timeout: 5000, windowsHide: true }).trim()
         modulesDir = path.join(prefix, 'lib', 'node_modules')
       } catch {
         modulesDir = '/usr/local/lib/node_modules'
@@ -2350,7 +2353,7 @@ async function _tryR2Install(version, source, logs) {
       binDir = fs.existsSync('/opt/homebrew/bin') ? '/opt/homebrew/bin' : '/usr/local/bin'
     } else {
       try {
-        const prefix = execSync('npm config get prefix', { encoding: 'utf8', timeout: 5000 }).trim()
+        const prefix = execSync('npm config get prefix', { encoding: 'utf8', timeout: 5000, windowsHide: true }).trim()
         binDir = path.join(prefix, 'bin')
       } catch {
         binDir = '/usr/local/bin'
@@ -14782,7 +14785,7 @@ const handlers = {
       if (!fs.existsSync(p) || seen.has(p)) continue
       seen.add(p)
       try {
-        const ver = cp.execSync(`"${p}" --version`, { timeout: 5000 }).toString().trim()
+        const ver = cp.execSync(`"${p}" --version`, { timeout: 5000, windowsHide: true }).toString().trim()
         found.push({ path: p, version: ver, source })
       } catch {}
     }
@@ -16100,7 +16103,7 @@ const handlers = {
     const cmd = cmds[kind]
     if (!cmd) throw new Error(`不支持的安装类型: ${kind}`)
     try {
-      const out = execSync(cmd, { encoding: 'utf8', timeout: 120000 })
+      const out = execSync(cmd, { encoding: 'utf8', timeout: 120000, windowsHide: true })
       return { success: true, output: out.trim() }
     } catch (e) {
       throw new Error(`安装失败: ${e.message || e}`)
@@ -16905,7 +16908,7 @@ const handlers = {
     const name = `agent-${id}-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.tar`
     const archivePath = path.join(BACKUPS_DIR, name)
     try {
-      execSync(`tar -cf "${archivePath}" -C "${sourceDir}" .`, { timeout: 30000 })
+      execSync(`tar -cf "${archivePath}" -C "${sourceDir}" .`, { timeout: 30000, windowsHide: true })
       return archivePath
     } catch (e) {
       throw new Error('备份失败: ' + (e.message || e))
