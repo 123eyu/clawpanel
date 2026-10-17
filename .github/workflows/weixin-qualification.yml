@@ -137,15 +137,23 @@ jobs:
               assert.notEqual(r.status, 'pass-native'); assert.notEqual(r.nativeQualification, true)
               if (r.status === 'diagnostic-ui-ipc-observed') assert.equal(r.nativeQualification, false)
               if (observe === 'true') {
-                // 仅复核可信harness已保存的完整receipt；不补造现场token或原生资格。
+                // 只校验已存harness receipt；SID/spawn取原sidecar，不声称独立重测parent/token。
                 const d = r.diagnostic, token = d?.tokenObservation, identity = d?.appIdentity
                 assert.equal(d?.tokenObservationRequested, true, 'Requested token receipt missing')
                 assert.ok(token?.app && token?.parent && identity, 'Requested token proof missing')
                 assert.equal(identity.exe.toLowerCase(), d.application.toLowerCase())
+                const folder = path.dirname(file), runner = JSON.parse(fs.readFileSync(path.join(folder, 'runner-proof.json'), 'utf8'))
+                const owners = JSON.parse(fs.readFileSync(path.join(folder, 'attach-spawn-ownership.json'), 'utf8'))
+                assert.ok(Array.isArray(owners), 'Stored spawn receipt missing')
+                const matches = owners.filter(p => p?.pid === identity.pid && typeof p.exe === 'string' && p.exe.toLowerCase() === d.application.toLowerCase())
+                assert.equal(matches.length, 1, 'Stored spawn identity is missing/ambiguous')
+                const spawn = matches[0]
+                assert.equal(spawn.proof?.pid, identity.pid); assert.equal(spawn.proof?.creationDate, identity.creationDate)
+                assert.equal(spawn.proof.exe.toLowerCase(), d.application.toLowerCase())
                 const { publicTokenObservation } = await import(pathToFileURL(path.resolve('tooling/scripts/weixin-native-token-observation.mjs')).href)
-                publicTokenObservation(token, { app: { pid: identity.pid, exe: d.application, startedAt: Date.parse(d.appSpawnStartedAt), returnedAt: Date.parse(identity.creationDate) }, parent: { pid: token.app.parentPid, exe: token.parent.exe }, expectedSid: token.parent.userSid })
+                try { publicTokenObservation(token, { app: { pid: spawn.pid, exe: spawn.exe, startedAt: spawn.startedAt, returnedAt: spawn.returnedAt }, parent: { pid: token.parent.pid, exe: token.parent.exe }, expectedSid: runner.sid }) } catch { throw new Error('Stored token receipt binding failed') }
                 assert.equal(token.app.cimCreationUtc, identity.creationDate, 'Token/app identity birth mismatch')
-                append('Token proof observed: stored readonly app/parent receipt; neverQualification=true; NOT QUALIFIED.')
+                append('Token proof observed: stored validated harness receipt only; neverQualification=true; NOT QUALIFIED.')
               }
               append(`Observed status: ${r.status}; Candidate: ${r.candidateSha}; scope: diagnostic-attach. NOT QUALIFIED.`)
             } else {
