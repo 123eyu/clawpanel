@@ -40,3 +40,7 @@ tar = "0.4"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-autostart = "2"
+
+[dev-dependencies]
+# 与reqwest复用实际Rustls；最低0.23.45防止已知TLS加密层边界漏洞复发。
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
