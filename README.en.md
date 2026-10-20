@@ -28,31 +28,16 @@
 ---
 
 <p align="center">
-  <img src="docs/feature-showcase.gif" width="800" alt="ClawPanel Feature Showcase">
+  <img src="docs/feature-showcase.gif" width="800" alt="ClawPanel model configuration demo">
 </p>
 
 ClawPanel is a visual management panel for multiple AI Agent frameworks, currently supporting [OpenClaw](https://github.com/1186258278/OpenClawChineseTranslation), [Hermes Agent](https://github.com/nousresearch/hermes-agent), [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), [OpenCode](https://github.com/anomalyco/opencode), and experimental [Pi](https://github.com/earendil-works/pi). It features a **built-in intelligent AI assistant** that helps you install, auto-diagnose configurations, troubleshoot issues, and fix errors. 8 tools + 4 modes + interactive Q&A — easy to manage for beginners and experts alike.
 
 > 🌐 **Website**: [claw.qt.cool](https://claw.qt.cool/) | 📦 **Download**: [Official Download Center](https://claw.qt.cool/download) | 📚 **Docs**: [Documentation index](docs/index.md) | Fallback: [GitHub Releases](https://github.com/qingchencloud/clawpanel/releases/latest)
 
-### 🧪 Free Testing: QingChen Cloud
+### 🌐 Website account and official models
 
-[QingChen Cloud](https://gpt.qt.cool/) is ClawPanel's companion check-in testing platform for trials and functional verification. ClawPanel does not include or auto-read a QingChen Cloud key. Sign up and visit the [check-in page](https://gpt.qt.cool/checkin) to obtain testing credits and your own API Key, then paste it into ClawPanel to select and configure models. Current availability and credit rules are shown on QingChen Cloud.
-
-### 🤝 Sponsored: CiyAPI
-
-> Third-party sponsored placement; CiyAPI's current terms apply.
-
-<p align="center">
-  <a href="https://ciyapi.79tian.com" rel="sponsored noopener noreferrer"><img src="https://img.shields.io/badge/🤝 CiyAPI-Sponsored-6366f1?style=for-the-badge" alt="CiyAPI sponsored service"></a>
-</p>
-
-- **Frontier Models** — GPT, Claude, Gemini, Grok, Kimi, and more
-- **Top-up Benefit** — ¥1 funds $1 in platform usage credit
-- **Discounted Routes** — Selected routes use discounted pricing; see the model marketplace
-- **OpenAI Compatible** — Get an API Key and connect through ClawPanel
-
-Register at [CiyAPI](https://ciyapi.79tian.com/sign-up), create an API Key, and use `https://ciyapi.79tian.com/v1` as the OpenAI-compatible Base URL. See the [model marketplace](https://ciyapi.79tian.com/pricing/) for current models and pricing.
+[claw.qt.cool](https://claw.qt.cool) is the official ClawPanel website. Connect your website account to use **official models** in the built-in assistant and every engine without bringing your own API key. Credits, usage and referral rewards are managed on the website. Your own keys and local configuration stay independent and can be switched at any time; you can also skip sign-in and keep using your own key.
 
 ### 🔥 Dev Board / Embedded Device Support
 
@@ -99,7 +84,6 @@ A community of passionate AI Agent developers and enthusiasts — join us!
 - **Cron Jobs** — Cron-based scheduled execution, multi-channel delivery
 - **Log Viewer** — Multi-source real-time logs with keyword search
 - **Memory Management** — Memory file view/edit, categorized management, ZIP export, Agent switching
-- **CiyAPI Sponsorship** — GPT, Claude, and other models; ¥1 funds $1 in platform usage credit
 - **Extensions** — cftunnel tunnel management, ClawApp status monitoring
 - **About** — Version info, community links, related projects, one-click upgrade
 

@@ -41,12 +41,12 @@ test('晴辰云免费测试与词元 API 赞助入口使用独立 Provider', () 
   assert.match(assistant, /const providerKey = definition\.provider\.providerKey/)
 })
 
-test('全部 README 同时保留晴辰云免费测试与词元 API 赞助推广', () => {
+test('全部 README 已移除旧第三方推广并改为官网介绍', () => {
   for (const file of readmes) {
     const content = read(file)
-    assert.match(content, /https:\/\/gpt\.qt\.cool/)
-    assert.match(content, /https:\/\/ciyapi\.79tian\.com/)
-    assert.match(content, /rel="sponsored noopener noreferrer"/)
+    assert.doesNotMatch(content, /gpt\.qt\.cool|ciyapi\.79tian\.com|词元 API|詞元 API|晴辰云|晴辰雲|CiyAPI|QingChen Cloud/i)
+    assert.match(content, /https:\/\/claw\.qt\.cool/)
+    assert.match(content, /官网账号|官網帳號|Website account|Website-Konto|Cuenta web|Compte du site|公式サイトアカウント|공식 웹사이트|Conta do site|Аккаунт сайта|Tài khoản website/i)
   }
 })
 
@@ -82,10 +82,6 @@ test('晴辰云快捷入口不内置、自动读取或静默复用旧密钥', ()
   assert.match(assistantLocale, /不内置或自动读取晴辰云密钥/)
   assert.doesNotMatch(assistantLocale, /qtcoolSyncFrom/)
 
-  for (const file of readmes) {
-    const content = read(file)
-    assert.match(content, /does not include|不内置|不內建|内蔵されず|내장되어 있지|không tích hợp|no incluye|não inclui|не содержит|n'intègre|enthält keinen/i)
-  }
   for (const lang of ['zh-CN', 'zh-TW', 'en', 'ja', 'ko', 'vi', 'es', 'pt', 'ru', 'fr', 'de']) {
     const locale = JSON.parse(read(`src/locales/${lang}.json`))
     assert.equal('qtcoolSyncFrom' in locale.assistant, false)
@@ -95,14 +91,12 @@ test('晴辰云快捷入口不内置、自动读取或静默复用旧密钥', ()
 test('文案区分免费测试与赞助福利', () => {
   const modelsLocale = read('src/locales/modules/models.js')
   const assistantLocale = read('src/locales/modules/assistant.js')
-  const readme = read('README.md')
 
-  for (const content of [modelsLocale, assistantLocale, readme]) {
+  for (const content of [modelsLocale, assistantLocale]) {
     assert.match(content, /免费测试/)
     assert.match(content, /晴辰云/)
     assert.match(content, /赞助/)
     assert.match(content, /¥1/)
     assert.match(content, /\$1/)
   }
-  assert.match(readme, /第三方赞助推广/)
 })
