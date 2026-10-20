@@ -1452,6 +1452,8 @@ impl Platform {
             state.connection = Value::Null;
             state.benefits = Value::Null;
             state.updated_at = None;
+            // 退出是可预期的用户操作，旧错误不应继续展示；撤销结果由 revocationPending 单独提示。
+            state.error = None;
             let pending_connection = state.pending_connection.take();
             (
                 epoch,
@@ -1528,7 +1530,8 @@ impl Platform {
                         self.save_vault(vault)?;
                     }
                     state.error = None;
-                } else {
+                } else if !local_only {
+                    // 本地退出时服务器撤销按设计延后重试，不是失败；仅在线退出失败才提示。
                     state.error = Some("platform_revocation_pending".into());
                 }
             }

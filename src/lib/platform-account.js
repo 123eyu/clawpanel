@@ -44,7 +44,8 @@ export function platformErrorText(error) {
   const code = aliases[rawCode] || rawCode.replace(/^platform_/, '')
   const key = `platform.errors.${code}`
   const translated = t(key)
-  return translated === key ? t('platform.errors.unavailable') : translated
+  // 未知错误码保留原文，便于定位“官方服务暂不可用”背后的真实原因。
+  return translated === key ? (code ? `${t('platform.errors.unavailable')} (${code})` : t('platform.errors.unavailable')) : translated
 }
 
 export function getPlatformAccount() { return snapshot }

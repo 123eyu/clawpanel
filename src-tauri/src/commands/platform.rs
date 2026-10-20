@@ -796,6 +796,12 @@ impl Platform {
                 if signed_in {
                     self.refresh_snapshot().await
                 } else {
+                    let mut state = self.state.lock().await;
+                    if state.phase == "guest" {
+                        state.error = None;
+                    }
+                    drop(state);
+                    self.emit_snapshot().await;
                     Ok(self.snapshot().await)
                 }
             }

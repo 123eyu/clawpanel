@@ -6,7 +6,7 @@ import { showConfirm } from '../components/modal.js'
 import { showInvitationDialog } from '../components/engagement.js'
 import { renderPlatformOnboarding } from '../lib/platform-onboarding.js'
 import { createPlatformEngineAccessCard } from '../components/platform-engine-access.js'
-import { getPlatformAccount, initPlatformAccount, refreshPlatformAccount, onPlatformAccountChange, platformAccountAction, openPlatformMember, formatCredits, displayPlanName, trialPresentation, platformErrorText, recoverPlatformRequest, getPlatformPublicOffer, loadPlatformPublicOffer, onPlatformPublicOfferChange } from '../lib/platform-account.js'
+import { getPlatformAccount, initPlatformAccount, restorePlatformAccount, refreshPlatformAccount, onPlatformAccountChange, platformAccountAction, openPlatformMember, formatCredits, displayPlanName, trialPresentation, platformErrorText, recoverPlatformRequest, getPlatformPublicOffer, loadPlatformPublicOffer, onPlatformPublicOfferChange } from '../lib/platform-account.js'
 import '../style/platform-onboarding.css'
 
 let dispose = null
@@ -188,7 +188,7 @@ export function render() {
     page.setAttribute('aria-busy', String(loading || busy))
     page.innerHTML = `<div class="page-header"><h1 class="page-title">${t('platform.title')}</h1><p class="page-desc">${t('platform.description')}</p></div>
       ${!isTauriRuntime() ? `<section class="card"><p>${t('platform.desktopOnly')}</p><div class="platform-actions platform-section">${assistantLink()}</div></section>` : (state.member ? memberView(state, phase) : guestView(state, phase) + bindingView(state)) + connectionView(state)}
-      ${visibleError ? `<div class="platform-feedback platform-error" role="alert">${icon('alert-triangle', 16)}<p>${escape(visibleError)}</p></div>` : ''}
+      ${visibleError ? `<div class="platform-feedback platform-error" role="alert">${icon('alert-triangle', 16)}<p>${escape(visibleError)}</p><button type="button" class="btn btn-secondary btn-sm" data-platform-action="retry" ${busy ? 'disabled' : ''}>${t('common.retry')}</button></div>` : ''}
       ${state.revocationPending ? `<div class="platform-feedback platform-feedback-warning" role="status">${icon('info', 16)}<p>${t('platform.revocationPending')}</p></div>` : ''}
       ${notice ? `<div class="platform-feedback" role="status">${icon('info', 16)}<p>${escape(notice)}</p></div>` : ''}
       <footer class="platform-account-footer"><p class="platform-scope">${t('platform.scopeHint')}</p>${loading || busy ? `<p class="platform-loading" role="status" data-platform-account-loading>${icon('refresh-cw', 13)}${t(busy ? 'platform.refreshing' : 'platform.checkingAccount')}</p>` : state.member && state.updatedAt ? `<span class="platform-updated">${t('platform.updated')}: ${escape(date(state.updatedAt))}</span>` : ''}</footer>`
@@ -221,6 +221,10 @@ export function render() {
     busy = true; activeAction = action || 'recover'; error = ''; notice = ''; draw()
     try {
       if (recover) await recoverPlatformRequest(recover.dataset.platformRecover)
+      else if (action === 'retry') {
+        await restorePlatformAccount()
+        if (version === actionVersion) error = ''
+      }
       else if (action === 'refresh') await refreshPlatformAccount({ force: true })
       else if (action === 'member') {
         await openPlatformMember('account')
