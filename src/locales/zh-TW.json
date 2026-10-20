@@ -6166,6 +6166,8 @@
       "connection_pending_limit": "仍有连接等待确认，请先完成或取消。",
       "connection_capacity": "官网连接服务繁忙，请稍后重试。",
       "connection_not_found": "连接事务不可用，请重新连接。",
+      "connection_response_invalid": "官網回傳的連線資訊異常，請重試；若持續出現，請更新客戶端或回饋。",
+      "idempotency_conflict": "重複的請求內容不一致，請重試。",
       "connection_expired": "连接已超时，请重新连接。",
       "connection_cancelled": "连接已取消。",
       "connection_rejected": "官网已拒绝本次连接。",

@@ -741,8 +741,14 @@ impl Platform {
                     None,
                 )
                 .await?;
-            if response.status != 200 && response.error.is_none() {
-                return Err("platform_connection_response_invalid".into());
+            if response.status != 200 {
+                if matches!(response.status, 429 | 503) {
+                    let _ = self.capture_retry_after(epoch, &response.headers).await;
+                }
+                return Err(response
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "platform_connection_response_invalid".into()));
             }
             let value = connection_json(self, epoch, response).await?;
             if connection_id(&value)? != id || expires_at(&value)? != expires {
@@ -775,6 +781,14 @@ impl Platform {
         device_name: &str,
         language: Option<&str>,
     ) -> Result<(), String> {
+        // 上次失败留下的本机 pending 连接先撤销，避免官网 pending 上限挡住重试。
+        let stale = {
+            let mut state = self.state.lock().await;
+            state.pending_connection.take()
+        };
+        if let Some(stale) = stale {
+            let _ = self.delete_connection(&stale).await;
+        }
         {
             let mut state = self.state.lock().await;
             if state.epoch != epoch {
@@ -820,8 +834,14 @@ impl Platform {
                 Some(&identity::random_id()),
             )
             .await?;
-        if response.status != 201 && response.error.is_none() {
-            return Err("platform_connection_response_invalid".into());
+        if response.status != 201 {
+            if matches!(response.status, 429 | 503) {
+                let _ = self.capture_retry_after(epoch, &response.headers).await;
+            }
+            return Err(response
+                .error
+                .clone()
+                .unwrap_or_else(|| "platform_connection_response_invalid".into()));
         }
         let created = connection_json(self, epoch, response).await?;
         let id = connection_id(&created)?.to_string();

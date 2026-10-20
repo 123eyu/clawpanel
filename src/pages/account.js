@@ -199,7 +199,9 @@ export function render() {
     } else if (document.activeElement !== document.body) focusSelector = ''
     const phaseKey = `platform.phase.${state.phase}`
     const phase = t(phaseKey) === phaseKey ? t('platform.phase.reauth_required') : t(phaseKey)
-    const visibleError = error || (state.error ? platformErrorText(state.error) : '')
+    // 撤销待确认属于状态提示，已有独立黄色横幅，不再重复显示为红色错误。
+    const errorCode = typeof state.error === 'string' ? state.error : ''
+    const visibleError = error || (state.error && errorCode !== 'platform_revocation_pending' ? platformErrorText(state.error) : '')
     page.dataset.platformAccountState = state.phase
     page.setAttribute('aria-busy', String(loading || busy))
     page.innerHTML = `<div class="page-header"><h1 class="page-title">${t('platform.title')}</h1><p class="page-desc">${t('platform.description')}</p></div>

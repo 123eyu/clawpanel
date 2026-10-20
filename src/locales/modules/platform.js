@@ -211,6 +211,8 @@ export default {
     connection_pending_limit: _('仍有连接等待确认，请先完成或取消。', 'A connection is still pending. Complete or cancel it first.'),
     connection_capacity: _('官网连接服务繁忙，请稍后重试。', 'The website connection service is busy. Try again later.'),
     connection_not_found: _('连接事务不可用，请重新连接。', 'This connection is unavailable. Connect again.'),
+    connection_response_invalid: _('官网返回的连接信息异常，请重试；如果持续出现，请更新客户端或反馈。', 'The website returned an unexpected connection response. Try again; if it persists, update the client or report it.', '官網回傳的連線資訊異常，請重試；若持續出現，請更新客戶端或回饋。'),
+    idempotency_conflict: _('重复的请求内容不一致，请重试。', 'The repeated request did not match. Try again.', '重複的請求內容不一致，請重試。'),
     connection_expired: _('连接已超时，请重新连接。', 'The connection timed out. Connect again.'),
     connection_cancelled: _('连接已取消。', 'Connection cancelled.'),
     connection_rejected: _('官网已拒绝本次连接。', 'The website declined this connection.'),

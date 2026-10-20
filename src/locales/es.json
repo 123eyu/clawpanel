@@ -6166,6 +6166,8 @@
       "connection_pending_limit": "A connection is still pending. Complete or cancel it first.",
       "connection_capacity": "The website connection service is busy. Try again later.",
       "connection_not_found": "This connection is unavailable. Connect again.",
+      "connection_response_invalid": "The website returned an unexpected connection response. Try again; if it persists, update the client or report it.",
+      "idempotency_conflict": "The repeated request did not match. Try again.",
       "connection_expired": "The connection timed out. Connect again.",
       "connection_cancelled": "Connection cancelled.",
       "connection_rejected": "The website declined this connection.",
