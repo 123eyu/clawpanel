@@ -6190,6 +6190,7 @@
       "oauth_metadata_invalid": "The website sign-in service returned an unexpected configuration. Try again later.",
       "installation_in_use": "Another ClawPanel instance is using this account. Close it and try again.",
       "clock_invalid": "The system clock is invalid. Correct the time and try again.",
+      "clock_skew": "Your computer clock differs from the website. Correct the system time and try again.",
       "binding_not_ready": "This installation is not connected to the account yet. Try again later.",
       "binding_rejected": "The website rejected this installation’s connection request.",
       "callback_unavailable": "Could not receive the sign-in result. Start the connection again.",

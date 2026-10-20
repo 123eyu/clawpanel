@@ -235,6 +235,7 @@ export default {
     oauth_metadata_invalid: _('官网登录服务配置异常，请稍后重试。', 'The website sign-in service returned an unexpected configuration. Try again later.', '官網登入服務設定異常，請稍後重試。'),
     installation_in_use: _('另一个 ClawPanel 正在使用此账户，请关闭后重试。', 'Another ClawPanel instance is using this account. Close it and try again.', '另一個 ClawPanel 正在使用此帳戶，請關閉後重試。'),
     clock_invalid: _('系统时间异常，请校准时间后重试。', 'The system clock is invalid. Correct the time and try again.', '系統時間異常，請校正時間後重試。'),
+    clock_skew: _('本机时间与官网不一致，请校准系统时间后重试。', 'Your computer clock differs from the website. Correct the system time and try again.', '本機時間與官網不一致，請校正系統時間後重試。'),
     binding_not_ready: _('此安装的账户连接尚未完成，请稍后重试。', 'This installation is not connected to the account yet. Try again later.', '此安裝的帳戶連線尚未完成，請稍後重試。'),
     binding_rejected: _('官网拒绝了此安装的连接请求。', 'The website rejected this installation’s connection request.', '官網拒絕了此安裝的連線請求。'),
     callback_unavailable: _('无法接收官网登录结果，请重新发起连接。', 'Could not receive the sign-in result. Start the connection again.', '無法接收官網登入結果，請重新發起連線。'),

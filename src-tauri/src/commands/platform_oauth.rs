@@ -862,10 +862,17 @@ impl Platform {
             let now = chrono::Utc::now().timestamp();
             let expires = expires_at(&created)?;
             let interval = created["poll_interval_seconds"].as_u64().filter(|value| (5..=300).contains(value)).ok_or("platform_connection_response_invalid")?;
-            if created["status"] != "pending" || expires <= now || expires > now + 300 {
+            // 服务端与本机时钟可能存在秒级偏差；窗口判断保留容差，超出容差时提示校准时间。
+            const CLOCK_SKEW: i64 = 5;
+            if created["status"] != "pending" {
                 return Err("platform_connection_response_invalid".into());
             }
-            let deadline = (started + Duration::from_secs(300)).min(Instant::now() + Duration::from_secs((expires - now) as u64));
+            if expires <= now - CLOCK_SKEW || expires > now + 300 + CLOCK_SKEW {
+                return Err("platform_clock_skew".into());
+            }
+            let window = (expires - now).clamp(1, 305) as u64;
+            let deadline = (started + Duration::from_secs(300))
+                .min(Instant::now() + Duration::from_secs(window + CLOCK_SKEW as u64));
             let expected_uri = format!("{}/oauth/connect?connection_id={id}", self.transport.origin);
             if created["browser_authorization_uri"].as_str() != Some(expected_uri.as_str()) { return Err("platform_connection_response_invalid".into()); }
             let mut browser = Url::parse(&expected_uri).map_err(|_| "platform_connection_response_invalid")?;
