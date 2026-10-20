@@ -232,8 +232,12 @@ function renderChannelCard(state, channel) {
 
 function renderEditor(state) {
   const draft = state.editing
+  // 旧渠道的预设标识用于同步定位，预设下架后仍保留原值。
+  const existingCustomPreset = !draft.isNew && draft.presetKey
+    && !PROVIDER_PRESETS.some(p => p.key === draft.presetKey)
   const presetOptions = [
     `<option value="" ${draft.presetKey ? '' : 'selected'}>${t('modelChannels.presetCustom')}</option>`,
+    ...(existingCustomPreset ? [`<option value="${attr(draft.presetKey)}" selected>${t('modelChannels.presetExistingCustom')}</option>`] : []),
     ...PROVIDER_PRESETS.map(p => `<option value="${attr(p.key)}" ${p.key === draft.presetKey ? 'selected' : ''}>${esc(p.label)}</option>`),
   ].join('')
   const modelLines = (draft.models || []).map(m => m.id).join('\n')

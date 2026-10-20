@@ -21,6 +21,8 @@ import { showConfirm } from '../../../components/modal.js'
 import { getChatStore, getSourceLabel } from '../lib/chat-store.js'
 import { svgIcon } from '../lib/svg-icons.js'
 import { t } from '../../../lib/i18n.js'
+import { createOfficialEngineChat } from '../../../components/official-engine-chat.js'
+import '../../../style/official-engine-chat.css'
 
 // ----------------------------------------------------------- helpers
 
@@ -278,6 +280,7 @@ export function render() {
   const el = document.createElement('div')
   el.className = 'hermes-chat-page'
   el.dataset.engine = 'hermes'
+  const officialChat = createOfficialEngineChat('hermes', official => el.classList.toggle('has-official-channel', official))
 
   const store = getChatStore()
 
@@ -832,6 +835,7 @@ export function render() {
         </section>
       </div>
     `
+    el.prepend(officialChat.element)
     bind()
 
     // Restore / auto-scroll.
@@ -1643,6 +1647,7 @@ export function render() {
   // MutationObserver watches our parent; when `el` is detached, we run the
   // full teardown (stream listeners, subscription, search modal, keydown).
   const teardown = () => {
+    officialChat.destroy()
     document.removeEventListener('keydown', onGlobalKey)
     document.removeEventListener('click', onGlobalClick)
     closeSearch()

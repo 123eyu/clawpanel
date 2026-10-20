@@ -140,6 +140,13 @@ function invalidate(...cmds) {
 // 导出 invalidate 供外部使用
 export { invalidate }
 
+// 官网账户与模型只走原生命令；正文及账户状态不进入通用请求日志。
+async function platformInvoke(command, args = {}) {
+  if (!isTauriRuntime()) throw new Error('desktop_required')
+  const nativeInvoke = await getTauriInvoke()
+  return nativeInvoke('platform_call', { command, args })
+}
+
 async function invoke(cmd, args = {}) {
   const start = Date.now()
   const tauriInvoke = WEB_ONLY_CMDS.has(cmd) ? null : await getTauriInvoke()
@@ -278,6 +285,22 @@ function _debouncedReloadGateway() {
 
 // 导出 API
 export const api = {
+  platformPublicBenefits: () => platformInvoke('public_benefits'),
+  platformGetInvitationPoster: () => platformInvoke('read_invitation_poster'),
+  platformSaveInvitationPoster: (args) => platformInvoke('save_invitation_poster', args),
+  platformSnapshot: () => platformInvoke('snapshot'),
+  platformRestore: () => platformInvoke('restore'),
+  platformLogin: (args = {}) => platformInvoke('login', args),
+  platformLoginCancel: () => platformInvoke('login_cancel'),
+  platformBind: (deviceName = '', args = {}) => platformInvoke('bind', { ...args, deviceName }),
+  platformRefresh: () => platformInvoke('refresh'),
+  platformLogout: (localOnly = false) => platformInvoke('logout', { localOnly }),
+  platformUnbind: () => platformInvoke('unbind'),
+  platformOpenMember: (section = 'account') => platformInvoke('open_member', { section }),
+  platformModels: (modelId = '') => platformInvoke('models', modelId ? { modelId } : {}),
+  platformSend: (operationId, body) => platformInvoke('send', { operationId, body }),
+  platformCancel: (operationId) => platformInvoke('cancel', { operationId }),
+  platformRecover: (operationId) => platformInvoke('recover', { operationId }),
   // Pi：共用受管运行时，桌面 IPC / Web HTTP 提供一致的事件游标与管理接口。
   piStatus: () => cachedInvoke('pi_call', { command: 'status' }, 2000),
   piCall: (command, args = {}) => { if (command !== 'events') invalidate('pi_call'); return invoke('pi_call', { command, args }) },
@@ -304,6 +327,7 @@ export const api = {
   getVersionInfo: () => cachedInvoke('get_version_info', {}, 30000),
   getStatusSummary: () => cachedInvoke('get_status_summary', {}, 60000),
   readOpenclawConfig: () => cachedInvoke('read_openclaw_config'),
+  openclawGatewayOfficial: (action, args = {}) => invoke('openclaw_gateway_official', { action, args }),
   calibrateOpenclawConfig: (mode = 'inherit') => { invalidate('read_openclaw_config', 'check_installation', 'list_backups', 'get_services_status', 'get_status_summary'); return invoke('calibrate_openclaw_config', { mode }).then(r => { _debouncedReloadGateway(); return r }) },
   writeOpenclawConfig: (config, opts = {}) => { invalidate('read_openclaw_config'); return invoke('write_openclaw_config', { config }).then(r => { if (opts.noReload !== true) _debouncedReloadGateway(); return r }) },
   deleteOpenclawModelProvider: (providerKey, opts = {}) => {
@@ -349,11 +373,23 @@ export const api = {
   revealModelChannelKey: (channelId) => invoke('reveal_model_channel_key', { channelId }),
 
   // DeepSeek Harness（回环服务；Web 与 Tauri 使用同名后端命令）
+  officialEngineConnect: (engine, modelId, expected = null) => invoke('official_engine_connect', { engine, modelId, expected }),
+  officialEngineAccess: async (action, args = {}) => {
+    if (!isTauriRuntime()) throw new Error('desktop_required')
+    const nativeInvoke = await getTauriInvoke()
+    return nativeInvoke('official_engine_access', { action, args })
+  },
+  officialEngineRun: (engine, input, sessionId = null, expected) => invoke('official_engine_run', { engine, input, sessionId, expected }),
+  officialEngineStatus: (engine, expected = null) => invoke('official_engine_status', { engine, expected }),
+  officialEngineDisconnect: (engine, expected) => invoke('official_engine_disconnect', { engine, expected }),
+  officialEngineCancel: (engine, expected) => invoke('official_engine_cancel', { engine, expected }),
   dshStatus: (port = 3080) => cachedInvoke('dsh_status', { port }, 2000),
   dshInstall: (channel = 'stable') => { invalidate('dsh_status'); return invoke('dsh_install', { channel }) },
   dshUninstall: () => { invalidate('dsh_status'); return invoke('dsh_uninstall') },
   dshEmbedSession: (port = 3080, storage = {}) => invoke('dsh_embed_session', { port, storage }),
   dshStart: (port = 3080) => { invalidate('dsh_status'); return invoke('dsh_start', { port }) },
+  dshConnectOfficial: () => invoke('dsh_connect_official'),
+  dshDisconnectOfficial: (epoch) => invoke('dsh_disconnect_official', { epoch }),
   dshStop: (port = 3080) => { invalidate('dsh_status'); return invoke('dsh_stop', { port }) },
   dshSyncProvider: ({ channelId, setDefault = false, port = 3080 }) => {
     invalidate('dsh_status')
@@ -368,6 +404,8 @@ export const api = {
   openCodeUninstall: () => { invalidate('opencode_status'); return invoke('opencode_uninstall') },
   openCodeEmbedSession: (port = 4096) => invoke('opencode_embed_session', { port }),
   openCodeStart: (port = 4096) => { invalidate('opencode_status'); return invoke('opencode_start', { port }) },
+  openCodeConnectOfficial: () => invoke('opencode_connect_official'),
+  openCodeDisconnectOfficial: (epoch) => invoke('opencode_disconnect_official', { epoch }),
   openCodeStop: (port = 4096) => { invalidate('opencode_status'); return invoke('opencode_stop', { port }) },
   openCodeSyncProvider: ({ channelId, setDefault = false }) => {
     invalidate('opencode_status')

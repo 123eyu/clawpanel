@@ -1209,7 +1209,7 @@ fn validate_openclaw_model_candidate(config: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn write_verified_json_with_backup(path: &Path, value: &Value) -> Result<(), String> {
+pub(crate) fn write_verified_json_with_backup(path: &Path, value: &Value) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "配置路径缺少父目录".to_string())?;

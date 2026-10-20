@@ -13941,7 +13941,7 @@ pub async fn hermes_read_config_full() -> Result<Value, String> {
 /// 2. `<HERMES_HOME>/hermes-agent/venv/{Scripts,bin}/python` — 0.20.5+ 官方源码安装
 /// 3. `~/.hermes-venv/{Scripts,bin}/python` — 旧 `uv pip install` 备选安装路径
 /// 4. `<uv tool dir>/hermes-agent/{Scripts,bin}/python` — 旧 `uv tool install` 路径
-fn hermes_venv_python() -> Option<PathBuf> {
+pub(super) fn hermes_venv_python() -> Option<PathBuf> {
     // 1. HERMES_PYTHON 环境变量优先
     if let Ok(custom) = std::env::var("HERMES_PYTHON") {
         let p = PathBuf::from(custom);
@@ -13971,6 +13971,35 @@ fn hermes_venv_python() -> Option<PathBuf> {
     }
     // 4. 旧 uv tool 路径
     hermes_uv_tool_python()
+}
+
+/// 安装发现只查已知文件，不能为账户页启动uv或Python。
+pub(super) fn official_installed_local() -> bool {
+    let executable = if cfg!(windows) {
+        "python.exe"
+    } else {
+        "python"
+    };
+    if std::env::var_os("HERMES_PYTHON").is_some_and(|p| PathBuf::from(p).is_file())
+        || hermes_source_venv_bin_dir().join(executable).is_file()
+    {
+        return true;
+    }
+    let bin = if cfg!(windows) { "Scripts" } else { "bin" };
+    let mut roots = Vec::new();
+    if let Some(dir) = hermes_tool_dir() {
+        roots.push(dir.join("hermes-agent"));
+    }
+    if let Some(dir) = std::env::var_os("UV_TOOL_DIR") {
+        roots.push(PathBuf::from(dir).join("hermes-agent"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".hermes-venv"));
+        roots.push(home.join(".local/share/uv/tools/hermes-agent"));
+    }
+    roots
+        .iter()
+        .any(|root| root.join(bin).join(executable).is_file())
 }
 
 /// 统一跑 venv python -c "<script>" 拿 JSON 结果。失败给可读错误。

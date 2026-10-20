@@ -75,6 +75,7 @@ export default {
   noModels: _('请先在模型渠道中同步至少一个渠道到 Pi。', 'Sync at least one Model Channel to Pi first.', '請先在模型渠道中同步至少一個渠道至 Pi。'),
   newSession: _('新建会话', 'New Session', '新增工作階段'),
   closeSession: _('关闭会话进程', 'Close Session Process', '關閉工作階段程序'),
+  sessionCapacity: _('会话已满，请先关闭空闲会话后重试。历史记录会保留。', 'Too many open sessions. Close an idle session and try again. Your history is kept.', '工作階段已滿，請先關閉閒置工作階段後重試。歷史紀錄會保留。'),
   closeConfirm: _('关闭当前 Pi 会话进程？会中任务将停止，历史会话保留。', 'Close the current Pi process? Active work stops; session history is kept.', '關閉目前 Pi 工作階段程序？任務將停止，歷史紀錄保留。'),
   emptySession: _('选择或新建一个会话开始工作。', 'Select or create a session to start working.', '選取或新增一個工作階段開始工作。'),
   input: _('给 Pi 发送消息…', 'Send a message to Pi…', '傳送訊息至 Pi…'),

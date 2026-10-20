@@ -17,12 +17,91 @@ struct PiBridge {
 static BRIDGE: LazyLock<tokio::sync::Mutex<Option<PiBridge>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(None));
 
+pub(super) fn official_installed_local() -> bool {
+    super::openclaw_dir()
+        .join(
+            "clawpanel/pi/runtime/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+        )
+        .is_file()
+}
+
+/// 只读已存在的桥；没有桥时立即返回，不生成脚本、目录或子进程。
+pub(super) async fn official_status_existing() -> Result<Value, String> {
+    let (port, token) = {
+        let mut slot = BRIDGE.lock().await;
+        let Some(bridge) = slot.as_mut() else {
+            return Ok(json!({"connected":false}));
+        };
+        if bridge
+            .child
+            .try_wait()
+            .map_err(|_| "official_runtime_unavailable")?
+            .is_some()
+        {
+            return Ok(json!({"connected":false}));
+        }
+        (bridge.port, bridge.token.clone())
+    };
+    let body: Value = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|_| "official_runtime_unavailable")?
+        .post(format!("http://127.0.0.1:{port}/call"))
+        .bearer_auth(token)
+        .json(&json!({"command":"official_status","args":{}}))
+        .send()
+        .await
+        .map_err(|_| "official_runtime_unavailable")?
+        .json()
+        .await
+        .map_err(|_| "official_runtime_unavailable")?;
+    let value = &body["result"];
+    Ok(
+        json!({"connected":value["status"]=="connected","memberId":value["memberId"],"epoch":value["epoch"],"running":false,"modelId":value["modelId"],"textOnly":value["textOnly"],"toolsAvailable":value["toolsAvailable"]}),
+    )
+}
+
+pub(super) async fn official_connect_selected(connection: Value) -> Result<Value, String> {
+    if !super::platform::engine_identity_current(&connection).await {
+        return Err("platform_account_changed".into());
+    }
+    let result = bridge_call("connect_official", json!({"connection":connection})).await?;
+    if !super::platform::engine_identity_current(&connection).await {
+        let _ = stop_official_for_identity(Some(&connection)).await;
+        return Err("platform_account_changed".into());
+    }
+    Ok(result)
+}
+
+pub(super) async fn official_new_session(
+    model_id: &str,
+    expected: &Value,
+) -> Result<Value, String> {
+    if !super::platform::engine_identity_current(expected).await {
+        return Err("platform_account_changed".into());
+    }
+    let status = official_status_existing().await?;
+    if status["connected"] != true
+        || status["memberId"] != expected["memberId"]
+        || status["epoch"] != expected["epoch"]
+    {
+        return Err("official_engine_not_connected".into());
+    }
+    let result = bridge_call("open_session", json!({"officialModelId":model_id})).await?;
+    if !super::platform::engine_identity_current(expected).await {
+        return Err("platform_account_changed".into());
+    }
+    Ok(json!({"sessionId":result["sessionId"],"model":result["state"]["model"],"newSession":true}))
+}
+
 /// 仅移除本项目的静态相对 import，保留 Node 内置模块导入；不改写第三方源码。
 fn bridge_source() -> String {
     let runtime = include_str!("../../../scripts/pi-runtime.js")
         .replace("\r\n", "\n")
         .replace("import { PiRpcProcess } from './pi-rpc.js'\n", "")
-        .replace("import { PI_PACKAGE_NAME, PI_PACKAGE_VERSION, piVersion, piNodeSupported, piCredentialEnv, mergePiConfig } from './pi-models.js'\n", "")
+        .replace("import { PI_PACKAGE_NAME, PI_PACKAGE_VERSION, piVersion, piNodeSupported, piCredentialEnv, mergePiConfig, piOfficialConnection, PI_OFFICIAL_SOURCE } from './pi-models.js'\n", "")
         .replace("import { PI_PERMISSION_SOURCE } from './pi-permission.js'\n", "");
     let bridge = include_str!("../../../scripts/pi-bridge.js")
         .replace("\r\n", "\n")
@@ -166,6 +245,25 @@ fn spawn_bridge(root: PathBuf) -> Result<PiBridge, String> {
 
 #[tauri::command]
 pub async fn pi_call(command: String, args: Option<Value>) -> Result<Value, String> {
+    let mut args = args.unwrap_or_else(|| json!({}));
+    let object = args.as_object_mut().ok_or("Pi 参数无效")?;
+    // 回环能力只由原生取得，不接受页面提供的地址、密钥或账户归属。
+    object.remove("connection");
+    if command == "connect_official" {
+        object.insert(
+            "connection".into(),
+            super::platform::engine_connection("pi").await?,
+        );
+    } else if command == "prompt" {
+        let selected = bridge_call("official_status", args.clone()).await?;
+        if selected["selected"].as_bool() == Some(true) {
+            args["connection"] = super::platform::engine_connection("pi").await?;
+        }
+    }
+    bridge_call(&command, args).await
+}
+
+async fn bridge_call(command: &str, args: Value) -> Result<Value, String> {
     let root = super::openclaw_dir().join("clawpanel").join("pi");
     let (port, token) = {
         let mut slot = BRIDGE.lock().await;
@@ -205,7 +303,7 @@ pub async fn pi_call(command: String, args: Option<Value>) -> Result<Value, Stri
         .map_err(|e| e.to_string())?
         .post(format!("http://127.0.0.1:{port}/call"))
         .bearer_auth(token)
-        .json(&json!({ "command": command, "args": args.unwrap_or_else(|| json!({})) }))
+        .json(&json!({ "command": command, "args": args }))
         .send()
         .await
         .map_err(|e| format!("Pi 桥请求失败: {e}"))?;
@@ -215,6 +313,56 @@ pub async fn pi_call(command: String, args: Option<Value>) -> Result<Value, Stri
         .map_err(|e| format!("Pi 桥响应无效: {e}"))?;
     if let Some(error) = body["error"].as_str() {
         return Err(error.to_string());
+    }
+    Ok(body["result"].clone())
+}
+
+/// 仅向已运行的私有桥清理官方会话，不为退出登录或应用退出新建桥。
+pub(crate) async fn stop_official_for_identity(expected: Option<&Value>) -> Result<Value, String> {
+    let (port, token) = {
+        let mut slot = BRIDGE.lock().await;
+        let Some(bridge) = slot.as_mut() else {
+            return Ok(json!({"disconnected":true,"bridgeRunning":false,"closed":0}));
+        };
+        if bridge
+            .child
+            .try_wait()
+            .map_err(|_| "official_runtime_unavailable")?
+            .is_some()
+        {
+            *slot = None;
+            return Ok(json!({"disconnected":true,"bridgeRunning":false,"closed":0}));
+        }
+        (bridge.port, bridge.token.clone())
+    };
+    let args = match expected {
+        Some(value) => {
+            let epoch = value["epoch"].as_u64().ok_or("platform_account_changed")?;
+            let member = value["memberId"]
+                .as_str()
+                .filter(|member| !member.is_empty())
+                .ok_or("platform_account_changed")?;
+            json!({"epoch":epoch,"memberId":member})
+        }
+        None => json!({}),
+    };
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|_| "official_runtime_unavailable")?
+        .post(format!("http://127.0.0.1:{port}/call"))
+        .bearer_auth(token)
+        .json(&json!({"command":"disconnect_official","args":args}))
+        .send()
+        .await
+        .map_err(|_| "official_runtime_stop_pending")?;
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|_| "official_runtime_stop_pending")?;
+    if body.get("error").is_some() {
+        return Err("official_runtime_stop_pending".into());
     }
     Ok(body["result"].clone())
 }

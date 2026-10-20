@@ -11,6 +11,7 @@ import { t } from '../lib/i18n.js'
 import { listAgentsCompat } from '../lib/api-compat.js'
 import { hasFeature } from '../lib/kernel.js'
 import { termHelpHtml, attachTermTooltips } from '../lib/term-tooltip.js'
+import { gatewayOfficialStatus, isGatewayOfficialAgent, GATEWAY_OFFICIAL_PROVIDER } from '../lib/openclaw-official-provider.js'
 
 export async function render() {
   const page = document.createElement('div')
@@ -62,6 +63,7 @@ async function loadAgents(page, state) {
     const [agents, config] = await Promise.all([
       listAgentsCompat(),
       api.readOpenclawConfig().catch(() => null),
+      gatewayOfficialStatus().catch(() => null),
     ])
     state.agents = agents
     state.bindings = Array.isArray(config?.bindings) ? config.bindings : []
@@ -133,7 +135,8 @@ function renderAgents(page, state) {
 
   container.innerHTML = state.agents.map(a => {
     const isDefault = a.isDefault === true
-    const isProtected = isDefault || a.id === 'main'
+    const managed = isGatewayOfficialAgent(a)
+    const isProtected = isDefault || a.id === 'main' || managed
     const name = a.identityName ? a.identityName.split(',')[0].trim() : t('agents.noDesc')
     return `
       <div class="agent-card" data-id="${a.id}">
@@ -144,8 +147,7 @@ function renderAgents(page, state) {
           </div>
           <div class="agent-card-actions">
             <button class="btn btn-sm btn-primary" data-action="detail" data-id="${a.id}">${t('agents.detail')}</button>
-            <button class="btn btn-sm btn-secondary" data-action="backup" data-id="${a.id}">${t('agents.backup')}</button>
-            <button class="btn btn-sm btn-secondary" data-action="edit" data-id="${a.id}">${t('agents.edit')}</button>
+            ${managed ? `<a class="btn btn-sm btn-secondary" href="#/models">${t('platform.gatewayOfficial.title')}</a>` : `<button class="btn btn-sm btn-secondary" data-action="backup" data-id="${a.id}">${t('agents.backup')}</button><button class="btn btn-sm btn-secondary" data-action="edit" data-id="${a.id}">${t('agents.edit')}</button>`}
             ${!isProtected ? `<button class="btn btn-sm btn-danger" data-action="delete" data-id="${a.id}">${t('agents.delete')}</button>` : ''}
           </div>
         </div>
@@ -184,6 +186,7 @@ function attachAgentEvents(page, state) {
     if (btn) {
       const action = btn.dataset.action
       const id = btn.dataset.id
+      if (['edit', 'delete', 'backup'].includes(action) && isGatewayOfficialAgent(state.agents.find(agent => agent.id === id))) return
       if (action === 'detail') location.hash = `#/agent-detail?id=${encodeURIComponent(id)}`
       else if (action === 'edit') showEditAgentDialog(page, state, id)
       else if (action === 'delete') await deleteAgent(page, state, id)
@@ -206,6 +209,7 @@ async function showAddAgentDialog(page, state) {
     const config = await api.readOpenclawConfig()
     const providers = config?.models?.providers || {}
     for (const [pk, pv] of Object.entries(providers)) {
+      if (pk === GATEWAY_OFFICIAL_PROVIDER) continue
       for (const m of (pv.models || [])) {
         const id = typeof m === 'string' ? m : m.id
         if (id) models.push({ value: `${pk}/${id}`, label: `${pk}/${id}` })
@@ -263,7 +267,7 @@ async function showAddAgentDialog(page, state) {
 
 async function showEditAgentDialog(page, state, id) {
   const agent = state.agents.find(a => a.id === id)
-  if (!agent) return
+  if (!agent || isGatewayOfficialAgent(agent)) return
 
   const name = agent.identityName ? agent.identityName.split(',')[0].trim() : ''
 
@@ -273,6 +277,7 @@ async function showEditAgentDialog(page, state, id) {
     const config = await api.readOpenclawConfig()
     const providers = config?.models?.providers || {}
     for (const [pk, pv] of Object.entries(providers)) {
+      if (pk === GATEWAY_OFFICIAL_PROVIDER) continue
       for (const m of (pv.models || [])) {
         const mid = typeof m === 'string' ? m : m.id
         if (mid) models.push({ value: `${pk}/${mid}`, label: `${pk}/${mid}` })
