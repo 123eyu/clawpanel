@@ -2,7 +2,8 @@
  * 模型配置页面
  * 服务商管理 + 模型增删改查 + 主模型选择
  */
-import { api } from '../lib/tauri-api.js'
+import { api, isTauriRuntime } from '../lib/tauri-api.js'
+import { createGatewayOfficialCard, GATEWAY_OFFICIAL_PROVIDER } from '../lib/openclaw-official-provider.js'
 import { toast } from '../components/toast.js'
 import { humanizeError } from '../lib/humanize-error.js'
 import { showModal, showConfirm } from '../components/modal.js'
@@ -19,6 +20,7 @@ import { t } from '../lib/i18n.js'
 import { scheduleGatewayRestart, fireRestartNow, cancelPendingRestart, onRestartState } from '../lib/gateway-restart-queue.js'
 import { termHelpHtml, attachTermTooltips } from '../lib/term-tooltip.js'
 import { syncExplicitModelPolicyAllow } from '../lib/openclaw-model-policy.js'
+let officialGatewayCard = null
 
 // HTML 转义，防止错误信息中的特殊字符破坏页面或被注入
 function escapeHtml(str) {
@@ -58,6 +60,10 @@ export async function render() {
   `
 
   const state = { config: null, search: '', undoStack: [] }
+  if (isTauriRuntime()) {
+    officialGatewayCard = createGatewayOfficialCard()
+    page.querySelector('.config-actions').before(officialGatewayCard.element)
+  }
   // 非阻塞:先返回 DOM,后台加载数据
   loadConfig(page, state)
   bindTopActions(page, state)
@@ -74,19 +80,10 @@ export async function render() {
 async function loadConfig(page, state) {
   const listEl = page.querySelector('#providers-list')
   try {
-    state.config = await api.readOpenclawConfig()
-    // 自动修复现有配置中的 baseUrl(如 Ollama 缺少 /v1),一次性迁移
-    const before = JSON.stringify(state.config?.models?.providers || {})
+    // 只在页面副本中规范化显示；打开页面不能改配置或 API 缓存。
+    state.config = structuredClone(await api.readOpenclawConfig())
     normalizeProviderUrls(state.config)
-    const after = JSON.stringify(state.config?.models?.providers || {})
-    const oldPrimary = getCurrentPrimary(state.config)
-    const normalizedModel = normalizeDefaultModelSelection(state.config)
-    if (before !== after || normalizedModel.changed) {
-      console.log('[models] 自动修复了模型配置,正在保存...')
-      await api.writeOpenclawConfig(state.config)
-      if (oldPrimary !== normalizedModel.primary) toast(t('models.primaryAutoSwitch', { model: normalizedModel.primary || t('models.notConfigured') }), 'info')
-      else if (before !== after) toast(t('models.autoFixUrl'), 'info')
-    }
+    normalizeDefaultModelSelection(state.config)
     renderDefaultBar(page, state)
     renderProviders(page, state)
   } catch (e) {
@@ -138,6 +135,7 @@ function collectAllModels(config) {
   const result = []
   const providers = config?.models?.providers || {}
   for (const [pk, pv] of Object.entries(providers)) {
+    if (pk === GATEWAY_OFFICIAL_PROVIDER) continue
     for (const m of (pv.models || [])) {
       const id = typeof m === 'string' ? m : m.id
       if (id) result.push({ provider: pk, modelId: id, full: `${pk}/${id}` })
@@ -177,6 +175,10 @@ function dedupeValidFallbacks(fallbacks, validModels, primary) {
 
 function normalizeDefaultModelSelection(config) {
   const allModels = collectAllModels(config)
+  // 受管模型只供专属 Agent 使用；没有普通模型时保留原默认配置。
+  if (!allModels.length && Object.hasOwn(config?.models?.providers || {}, GATEWAY_OFFICIAL_PROVIDER)) {
+    return { changed: false, primary: getCurrentPrimary(config) }
+  }
   const validModels = new Set(allModels.map(m => m.full))
   const modelConfig = ensureConfigDefaultModelConfig(config)
   let changed = false
@@ -270,6 +272,7 @@ function renderFallbackWaterfall(state) {
   const providers = state.config?.models?.providers || {}
   const candidatesByProvider = {}
   Object.keys(providers).forEach(pKey => {
+    if (pKey === GATEWAY_OFFICIAL_PROVIDER) return
     const pModels = providers[pKey].models || []
     const filtered = pModels.map(m => typeof m === 'string' ? m : m.id)
       .filter(mId => {
@@ -577,6 +580,7 @@ function renderProviders(page, state) {
 
   listEl.innerHTML = keys.map(key => {
     const p = providers[key]
+    if (key === GATEWAY_OFFICIAL_PROVIDER) return `<div class="config-section" data-provider="${key}"><div class="config-section-title">${escapeHtml(t('platform.gatewayOfficial.title'))}</div><p class="form-hint">${escapeHtml(t('platform.gatewayOfficial.managed'))}</p></div>`
     const models = p.models || []
     const filtered = search
       ? models.filter((m) => {
@@ -724,6 +728,8 @@ let _saveTimer = null
 let _batchTestAbort = null // 批量测试终止控制器
 
 export function cleanup() {
+  officialGatewayCard?.destroy()
+  officialGatewayCard = null
   clearTimeout(_saveTimer)
   _saveTimer = null
   if (_batchTestAbort) { _batchTestAbort.abort = true; _batchTestAbort = null }
@@ -738,7 +744,8 @@ function autoSave(state) {
 function normalizeProviderUrls(config) {
   const providers = config?.models?.providers
   if (!providers) return
-  for (const [, p] of Object.entries(providers)) {
+  for (const [key, p] of Object.entries(providers)) {
+    if (key === GATEWAY_OFFICIAL_PROVIDER) continue
     // 修复 API 类型
     if (p.api) {
       const lower = p.api.toLowerCase().trim()
@@ -1006,6 +1013,7 @@ function bindProviderButtons(listEl, page, state) {
 
 // 统一处理按钮动作
 async function handleAction(action, btn, card, section, providerKey, provider, page, state) {
+  if (providerKey === GATEWAY_OFFICIAL_PROVIDER) return
   switch (action) {
     case 'edit-provider':
       editProvider(page, state, providerKey)
@@ -1085,6 +1093,7 @@ async function handleAction(action, btn, card, section, providerKey, provider, p
 
 // 设置主模型入口
 function setPrimary(state, full) {
+  if (full.startsWith(GATEWAY_OFFICIAL_PROVIDER + '/')) return
   const oldPrimary = getCurrentPrimary(state.config)
   if (oldPrimary === full) return
 
@@ -1154,7 +1163,6 @@ function bindTopActions(page, state) {
   const gotoChannels = page.querySelector('#btn-goto-channels')
   if (gotoChannels) gotoChannels.onclick = () => { window.location.hash = '#/model-channels' }
   page.querySelector('#btn-undo').onclick = () => undo(page, state)
-
 }
 
 function uniqueProviderKey(providers, desired) {

@@ -64,6 +64,15 @@ export const PROVIDER_PRESETS = [
   { key: 'ollama', label: 'Ollama (本地)', baseUrl: 'http://127.0.0.1:11434/v1', api: 'openai-completions', site: 'https://ollama.com/' },
 ]
 
+// 胜算云服务商配置
+export const SHENGSUANYUN = {
+  baseUrl: 'https://router.shengsuanyun.com/api/v1',
+  site: 'https://www.shengsuanyun.com/',
+  providerKey: 'shengsuanyun',
+  brandName: '胜算云',
+  api: 'openai-completions',
+}
+
 // 常用模型预设（按服务商分组）
 export const MODEL_PRESETS = {
   openai: [
@@ -107,30 +116,3 @@ export const MODEL_PRESETS = {
     { id: 'deepseek-r1:32b', name: 'DeepSeek R1 32B', contextWindow: 32768, reasoning: true },
   ],
 }
-
-/**
- * 从 OpenAI Compatible 服务动态获取模型列表。
- * 密钥必须由当前操作显式传入，不从本地配置自动读取，避免旧密钥被静默复用。
- */
-async function fetchCompatibleModels(provider, apiKey) {
-  const key = (apiKey || provider.defaultKey || '').trim()
-  if (!key) return provider.models
-  try {
-    const resp = await fetch(provider.baseUrl + '/models', {
-      headers: { 'Authorization': 'Bearer ' + key },
-      signal: AbortSignal.timeout(8000)
-    })
-    if (resp.ok) {
-      const data = await resp.json()
-      if (data.data && data.data.length) {
-        return data.data.map(m => ({
-          id: m.id, name: m.id, contextWindow: 128000,
-          reasoning: /codex|thinking|reasoner|reasoning/i.test(m.id)
-        })).sort((a, b) => b.id.localeCompare(a.id))
-      }
-    }
-  } catch { /* use fallback */ }
-  return provider.models
-}
-
-

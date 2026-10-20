@@ -5,9 +5,9 @@
  */
 import { renderMarkdown } from '../lib/markdown.js'
 import { toast } from '../components/toast.js'
-import { humanizeError } from '../lib/humanize-error.js'
 import { showConfirm } from '../components/modal.js'
-import { api } from '../lib/tauri-api.js'
+import { api, isTauriRuntime } from '../lib/tauri-api.js'
+import { getPlatformAccount, initPlatformAccount, refreshPlatformAccount, onPlatformAccountChange, loadPlatformModels, sendPlatformRequest, pendingPlatformRequests, recoverPlatformRequest, platformErrorText, formatCredits } from '../lib/platform-account.js'
 import { OPENCLAW_KB } from '../lib/openclaw-kb.js'
 import { icon, statusIcon } from '../lib/icons.js'
 import {
@@ -46,11 +46,12 @@ const MODE_ICONS = {
   execute: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
   unlimited: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M18.178 8c5.096 0 5.096 8 0 8-5.095 0-7.133-8-12.739-8-4.585 0-4.585 8 0 8 5.606 0 7.644-8 12.74-8z"/></svg>',
 }
+// 模式文案按当前语言读取，不缓存模块首次加载时的译文。
 const MODES = {
-  chat:     { label: t('assistant.modeChat'), desc: t('assistant.modeChatDesc'), tools: false, readOnly: false, confirmDanger: true, accent: 'var(--text-secondary)' },
-  plan:     { label: t('assistant.modePlan'), desc: t('assistant.modePlanDesc'), tools: true, readOnly: true, confirmDanger: true, accent: 'var(--info)' },
-  execute:  { label: t('assistant.modeExecute'), desc: t('assistant.modeExecuteDesc'), tools: true, readOnly: false, confirmDanger: true, accent: 'var(--accent)' },
-  unlimited:{ label: t('assistant.modeUnlimited'), desc: t('assistant.modeUnlimitedDesc'), tools: true, readOnly: false, confirmDanger: false, accent: 'var(--warning)' },
+  chat:     { get label() { return t('assistant.modeChat') }, get desc() { return t('assistant.modeChatDesc') }, tools: false, readOnly: false, confirmDanger: true, accent: 'var(--text-secondary)' },
+  plan:     { get label() { return t('assistant.modePlan') }, get desc() { return t('assistant.modePlanDesc') }, tools: true, readOnly: true, confirmDanger: true, accent: 'var(--info)' },
+  execute:  { get label() { return t('assistant.modeExecute') }, get desc() { return t('assistant.modeExecuteDesc') }, tools: true, readOnly: false, confirmDanger: true, accent: 'var(--accent)' },
+  unlimited:{ get label() { return t('assistant.modeUnlimited') }, get desc() { return t('assistant.modeUnlimitedDesc') }, tools: true, readOnly: false, confirmDanger: false, accent: 'var(--warning)' },
 }
 const DEFAULT_MODE = 'execute'
 
@@ -1181,6 +1182,7 @@ function applyModeStyle(page, modeKey) {
   const main = page.querySelector('.ast-main') || page
   main.dataset.mode = modeKey
   positionModeSlider(page, modeKey)
+  if (_assistantChannel === 'official') renderOfficialControls()
 }
 
 function positionModeSlider(page, modeKey) {
@@ -2186,6 +2188,13 @@ let _streamRefreshTimer = null // 后台流式刷新定时器
 let _pendingImages = [] // [{ id, dataUrl, name, size }] 待发送图片
 let _errorContext = null // 待处理的错误上下文 { scene, title, hint, error, ts }
 let _soulCache = null // 灵魂移植缓存 { identity, soul, user, agents, tools, memory, recentMemories[] }
+let _assistantChannel = 'byok'
+let _officialModel = ''
+let _officialStream = true
+let _officialNotice = ''
+let _officialModelsLoading = false
+let _officialHistorySavePending = false
+let _platformUnsubscribe = null
 
 // ── 节流保存 ──
 function throttledSave() {
@@ -2528,7 +2537,8 @@ function loadSessions() {
 }
 
 function saveSessions() {
-  if (_sessions.length > MAX_SESSIONS) {
+  const preserveHistory = _assistantChannel === 'official' || _officialHistorySavePending
+  if (!preserveHistory && _sessions.length > MAX_SESSIONS) {
     _sessions = _sessions.slice(-MAX_SESSIONS)
   }
   // 保存时剥离图片 dataUrl（避免撑爆 localStorage）
@@ -2539,7 +2549,14 @@ function saveSessions() {
   })
   try {
     localStorage.setItem(SESSIONS_KEY, serialized)
+    _officialHistorySavePending = false
   } catch (e) {
+    if (preserveHistory && e.name === 'QuotaExceededError') {
+      if (!_officialHistorySavePending) toast(t('assistant.officialHistoryStorageFullToast'), 'warning')
+      // 原持久化字节保持不动，完整新回合留在内存，后续保存成功再清除待保存状态。
+      _officialHistorySavePending = true
+      return
+    }
     // QuotaExceeded: 清理最旧的会话
     if (e.name === 'QuotaExceededError' && _sessions.length > 1) {
       _sessions.shift()
@@ -2561,6 +2578,10 @@ function createSession() {
     updatedAt: Date.now()
   }
   _sessions.push(session)
+  if (_assistantChannel === 'official') {
+    session.channel = 'official'
+    session.platformMemberId = getPlatformAccount().member?.member_id || null
+  }
   _currentSessionId = session.id
   saveSessions()
   // Fix #226: 新会话重置熔断状态，与旧会话的错误历史隔离
@@ -4116,12 +4137,12 @@ function showSettings() {
               </select>
             </div>
           </div>
-          <div style="display:flex;gap:10px;align-items:flex-end">
-            <div class="form-group" style="flex:1;margin-bottom:0">
+          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
+            <div class="form-group" style="flex:1 1 180px;min-width:0;margin-bottom:0">
               <label class="form-label">API Key</label>
               <input class="form-input" id="ast-apikey" type="password" value="${escHtml(c.apiKey)}" placeholder="${escHtml(apiKeyPlaceholder(c.apiType))}">
             </div>
-            <div style="display:flex;gap:6px;padding-bottom:1px">
+            <div style="display:flex;flex-wrap:wrap;gap:6px;max-width:100%;padding-bottom:1px">
               <button class="btn btn-sm btn-secondary" id="ast-btn-test" title="${t('assistant.testConnTitle')}">${t('assistant.testBtn')}</button>
               <button class="btn btn-sm btn-secondary" id="ast-btn-models" title="${t('assistant.fetchModelsTitle')}">${t('assistant.fetchBtn')}</button>
               ${!isHermes ? `<button class="btn btn-sm btn-secondary" id="ast-btn-import" title="${t('assistant.importTitle')}">${icon('download', 14)} ${t('assistant.importBtn')}</button>` : ''}
@@ -4450,12 +4471,12 @@ function showSettings() {
       last?.select()
     }, 30)
   }
-  // 渲染厂商预设按钮（免费测试与赞助入口分开，其余保留常用厂商）
+  // 渲染厂商预设按钮，默认展示常用厂商
   const TOP_PRESETS = ['openai', 'anthropic', 'deepseek', 'google', 'ollama']
   let showAllPresets = false
   const renderPresetButtons = () => {
     const shown = showAllPresets
-      ? PROVIDER_PRESETS
+      ? PROVIDER_PRESETS.filter(p => !p.hidden)
       : PROVIDER_PRESETS.filter(p => TOP_PRESETS.includes(p.key))
     const presetBtnHtml = shown.map(p => `
       <button type="button" class="btn btn-xs btn-secondary ast-fb-preset-btn" data-preset-key="${p.key}" style="padding:4px 10px;font-size:11px;gap:4px">
@@ -5043,7 +5064,10 @@ function showSettings() {
 function updateModelBadge() {
   const badge = _page?.querySelector('#ast-model-badge')
   if (badge) {
-    if (_config.model) {
+    if (_assistantChannel === 'official') {
+      badge.textContent = _officialModel || t('platform.selectModel')
+      badge.className = 'ast-model-badge configured'
+    } else if (_config.model) {
       badge.textContent = _config.model
       badge.className = 'ast-model-badge configured'
     } else {
@@ -5053,8 +5077,232 @@ function updateModelBadge() {
   }
 }
 
+// 官方通道独立于自有 Key 的重试、备用模型与诊断上下文。
+// 能力缺失不等于不支持；官网模型清单是官方通道能力的唯一依据。
+function officialToolCapability(model) {
+  return model?.capabilities?.tool_calls === true ? 'supported' : model?.capabilities?.tool_calls === false ? 'text' : 'unknown'
+}
+
+function officialToolCapabilityLabel(model) {
+  const capability = officialToolCapability(model)
+  return t('assistant.' + (capability === 'supported' ? 'officialToolsSupported' : capability === 'text' ? 'officialTextOnly' : 'officialCapabilitiesUnknown'))
+}
+
+function officialToolIssue(model, tools) {
+  if (!tools.length) return ''
+  if (tools.length > 32) return 'officialToolsLimitHint'
+  const capability = officialToolCapability(model)
+  return capability === 'supported' ? '' : capability === 'text' ? 'officialToolsUnavailableHint' : 'officialToolsUnknownHint'
+}
+
+function renderOfficialControls() {
+  const host = _page?.querySelector('#ast-platform-controls')
+  if (!host) return
+  const state = getPlatformAccount()
+  const models = Array.isArray(state.models) ? state.models : state.models?.data || []
+  const eligible = state.member?.eligible_model_ids || []
+  const available = models.filter(model => eligible.includes(model.id))
+  if (_officialModel && !eligible.includes(_officialModel)) _officialModel = ''
+  const selected = available.find(model => model.id === _officialModel)
+  const streaming = selected?.capabilities?.streaming === true
+  const unresolved = pendingPlatformRequests()
+  const gateClosed = state.platformStatus?.fixture_mode === false && state.platformStatus?.real_upstream_enabled === false
+  const tools = getEnabledTools()
+  const toolIssue = state.phase === 'bound' && !gateClosed && !unresolved.length && selected ? officialToolIssue(selected, tools) : ''
+  const needsChat = toolIssue && toolIssue !== 'officialToolsLimitHint'
+  const status = toolIssue ? t('assistant.' + toolIssue) : _officialNotice || (unresolved.length ? t('platform.errors.request_pending') : state.phase === 'bound' ? gateClosed ? t('platform.errors.upstream_disabled') : t('platform.officialReady') : t(`platform.phase.${state.phase}`))
+  const price = selected?.price
+  const accountLabel = state.phase === 'bound' ? t('platform.title') : t('assistant.officialAccountAction')
+  host.innerHTML = `<label>${t('platform.channel')}<select class="form-input" id="ast-channel" ${_isStreaming ? 'disabled' : ''}><option value="byok" ${_assistantChannel === 'byok' ? 'selected' : ''}>${t('platform.byok')}</option><option value="official" ${_assistantChannel === 'official' ? 'selected' : ''} ${!isTauriRuntime() ? 'disabled' : ''}>${t('platform.official')}${!isTauriRuntime() ? ` · ${t('platform.desktopOnly')}` : ''}</option></select></label>
+    ${_assistantChannel === 'official' ? `<label><span class="sr-only">${t('platform.selectModel')}</span><select class="form-input" id="ast-official-model" ${_isStreaming || _officialModelsLoading || state.phase !== 'bound' || gateClosed ? 'disabled' : ''}><option value="">${t('platform.selectModel')}</option>${eligible.map(id => { const model = available.find(item => item.id === id); return `<option value="${escHtml(id).replaceAll('"', '&quot;')}" ${id === _officialModel ? 'selected' : ''}>${escHtml(model?.display_name || id)} · ${escHtml(officialToolCapabilityLabel(model))}</option>` }).join('')}</select></label>${selected ? `<span class="platform-tag" data-platform-tool-capability="${officialToolCapability(selected)}">${escHtml(officialToolCapabilityLabel(selected))}</span>` : ''}<label><input type="checkbox" id="ast-official-stream" ${_officialStream && streaming ? 'checked' : ''} ${!streaming || _isStreaming ? 'disabled' : ''}>${t('platform.stream')}</label><div class="ast-channel-guidance" data-platform-assistant-guidance><span>${t('assistant.officialChannelGuide')}</span>${selected ? `<button class="ast-channel-action" type="button" data-platform-refresh-model ${_isStreaming || _officialModelsLoading ? 'disabled' : ''}>${t('assistant.officialRefreshModelAction')}</button>` : ''}${needsChat ? `<button class="ast-channel-action" type="button" data-platform-switch-chat>${t('platform.switchToChat')}</button>` : ''}${toolIssue === 'officialToolsLimitHint' ? `<button class="ast-channel-action" type="button" data-platform-assistant-settings>${t('assistant.officialToolSettingsAction')}</button>` : ''}<a href="#/account" data-platform-assistant-account>${accountLabel}</a></div><div id="ast-official-status" role="status">${escHtml(status)}${price ? `<span class="ast-platform-price">${t('platform.priceInput')}: ${formatCredits(price.input_micro_cny_per_million)} / ${t('platform.priceCached')}: ${formatCredits(price.cached_input_micro_cny_per_million)} / ${t('platform.priceOutput')}: ${formatCredits(price.output_micro_cny_per_million)} ${t('platform.priceUnit')}</span>` : ''}${unresolved.map(item => `<div class="ast-platform-recover"><span>${escHtml(t(`platform.request.${item.state}`) === `platform.request.${item.state}` ? t('platform.errors.outcome_unknown') : t(`platform.request.${item.state}`))}</span><button class="btn btn-secondary btn-sm" data-platform-recover="${escHtml(item.operationId)}">${t('platform.recover')}</button></div>`).join('')}</div>` : `<div class="ast-channel-guidance" data-platform-assistant-guidance><span>${t('assistant.byokChannelGuide')}</span><button class="ast-channel-action" type="button" data-platform-assistant-settings>${t('assistant.byokSettingsAction')}</button></div>`}`
+  updateModelBadge()
+  const attach = _page.querySelector('#ast-btn-attach')
+  if (attach) attach.disabled = _assistantChannel === 'official'
+  if (_sendBtn && !_isStreaming) _sendBtn.disabled = _assistantChannel === 'official' && (state.phase !== 'bound' || !selected || gateClosed || unresolved.length > 0 || _officialModelsLoading)
+}
+
+async function refreshOfficialModels(modelId = _officialModel) {
+  if (!isTauriRuntime() || getPlatformAccount().phase !== 'bound' || !modelId || _officialModelsLoading || _isStreaming) return
+  _officialModelsLoading = true
+  renderOfficialControls()
+  try { await loadPlatformModels(modelId); _officialNotice = '' }
+  catch (error) { _officialNotice = platformErrorText(error); await refreshPlatformAccount({ force: true }).catch(() => {}) }
+  finally { _officialModelsLoading = false }
+  renderOfficialControls()
+  if (_assistantChannel === 'official' && _officialModel && _officialModel !== modelId) void refreshOfficialModels(_officialModel)
+}
+
+function officialContextMessages(session, maxRounds) {
+  const history = session.messages.filter(item => !item._platformIncomplete && ['user', 'assistant'].includes(item.role)
+    && (typeof item.content === 'string' && item.content || item.role === 'assistant' && item._platformContextVersion === 1 && Array.isArray(item._platformContext)))
+    .slice(-MAX_CONTEXT_TOKENS)
+  const messages = history.flatMap(item => item.role === 'assistant' && item._platformContextVersion === 1 && Array.isArray(item._platformContext)
+    ? item._platformContext.map(message => ({ ...message }))
+    : [{ role: item.role, content: item.content }])
+  // 整个用户回合一并裁剪，不能把 tool 结果与对应 assistant 调用拆开。
+  const limit = 255 - maxRounds * 2
+  while (messages.length > limit) {
+    const nextUser = messages.findIndex((message, index) => index > 0 && message.role === 'user')
+    if (nextUser < 0) break
+    messages.splice(0, nextUser)
+  }
+  return messages
+}
+
+function normalizeOfficialToolCall(call) {
+  const fn = call?.function
+  if (typeof call?.id !== 'string' || !call.id || call.type !== 'function'
+    || typeof fn?.name !== 'string' || !fn.name || typeof fn.arguments !== 'string') {
+    throw new Error('tool_not_supported')
+  }
+  // 仅续传契约字段；保留调用 ID 和参数原字符串，不带回供应商响应扩展。
+  return { id: call.id, type: call.type, function: { name: fn.name, arguments: fn.arguments } }
+}
+
+async function sendOfficialMessage(text) {
+  if (!text.trim() && !_pendingImages.length) return
+  if (_isStreaming) return
+  const account = getPlatformAccount()
+  const model = (Array.isArray(account.models) ? account.models : account.models?.data || []).find(item => item.id === _officialModel)
+  if (_pendingImages.length) { toast(t('platform.textOnly'), 'warning'); return }
+  if (account.phase !== 'bound') { toast(t('platform.errors.binding_required'), 'warning'); return }
+  if (account.platformStatus?.fixture_mode === false && account.platformStatus?.real_upstream_enabled === false) { toast(t('platform.errors.upstream_disabled'), 'warning'); return }
+  if (account.entitlements?.control_state !== 'active' || !(account.entitlements?.max_output_tokens > 0)) { toast(t('platform.errors.entitlements_unavailable'), 'warning'); return }
+  if (!model || !(account.member?.eligible_model_ids || []).includes(model.id)) { toast(t('platform.selectModelFirst'), 'warning'); return }
+  if (pendingPlatformRequests().length) { toast(t('platform.errors.request_pending'), 'warning'); return }
+  const tools = getEnabledTools()
+  const toolIssue = officialToolIssue(model, tools)
+  if (toolIssue) { toast(t('assistant.' + toolIssue), 'warning'); return }
+  let session = getCurrentSession()
+  if (session?.channel === 'official' && session.platformMemberId && session.platformMemberId !== account.member.member_id) {
+    toast(t('platform.errors.account_changed'), 'warning'); return
+  }
+  if (tools.length && session?.channel === 'official' && session.messages.some(item => item.role === 'assistant' && !item._platformIncomplete
+    && (item._platformContextVersion !== 1 || !Array.isArray(item._platformContext) || item._platformContextModel !== model.id))) {
+    session = createSession()
+    toast(t('assistant.officialToolsNewSessionToast'), 'info')
+  }
+  if (!session || session.channel !== 'official') session = createSession()
+  session.channel = 'official'
+  session.platformMemberId = account.member.member_id
+  session.officialModel = model.id
+  const user = { role: 'user', content: text.trim(), ts: Date.now() }
+  session.messages.push(user)
+  autoTitle(session)
+  // 只发送用户明确选择官方通道后建立的会话，不自动注入旧历史、本地文件或配置。
+  const maxRounds = Math.max(1, Math.min(_config.autoRounds || 8, 32))
+  const messages = [{ role: 'system', content: `${_config.assistantName || DEFAULT_NAME}. ${_config.assistantPersonality || DEFAULT_PERSONALITY}` }, ...officialContextMessages(session, maxRounds)]
+  const ai = { role: 'assistant', content: '', ts: Date.now() }
+  session.messages.push(ai)
+  _isStreaming = true
+  _officialNotice = ''
+  _abortController = new AbortController()
+  const controller = _abortController
+  const epoch = account.epoch
+  setSessionStatus(session.id, 'streaming')
+  if (_sendBtn) _sendBtn.innerHTML = stopIcon()
+  renderMessages(); renderSessionList(); renderOfficialControls(); saveSessions()
+  const toolHistory = []
+  const turnContext = []
+  try {
+    for (let round = 0; round < maxRounds; round++) {
+      if (controller.signal.aborted) throw new Error('cancelled')
+      if (epoch !== getPlatformAccount().epoch) throw new Error('account_changed')
+      let content = ''
+      let reasoning
+      const calls = []
+      const limit = Math.min(model.default_output_tokens || 1024, model.max_output_tokens || 8192, account.entitlements.max_output_tokens)
+      // 每轮可返回多个串行工具；发送前按完整旧用户回合再次检查消息上限。
+      while (messages.length > 256) {
+        const nextUser = messages.findIndex((message, index) => index > 1 && message.role === 'user')
+        if (nextUser < 0) throw new Error('context_limit_exceeded')
+        messages.splice(1, nextUser - 1)
+      }
+      const body = { model: model.id, messages, stream: _officialStream && model.capabilities?.streaming === true, max_tokens: limit }
+      if (body.stream) body.stream_options = { include_usage: true }
+      if (tools.length) { body.tools = tools; body.parallel_tool_calls = false }
+      const reply = await sendPlatformRequest(body, {
+        signal: controller.signal,
+        onRequest: status => { ai._platformOperationId = status.operationId; ai._platformRequestState = status.state || ai._platformRequestState; saveSessions(); renderOfficialControls() },
+        onDelta: chunk => {
+          if (getPlatformAccount().epoch !== epoch) return
+          const delta = chunk?.choices?.[0]?.delta || {}
+          if (typeof delta.content === 'string') { content += delta.content; ai.content += delta.content; throttledSave(); renderMessages() }
+          if (typeof delta.reasoning_content === 'string') reasoning = (reasoning ?? '') + delta.reasoning_content
+          for (const call of delta.tool_calls || []) {
+            const index = call.index ?? calls.length
+            calls[index] ||= { id: '', type: 'function', function: { name: '', arguments: '' } }
+            if (call.id) calls[index].id = call.id
+            if (call.function?.name) calls[index].function.name += call.function.name
+            if (call.function?.arguments) calls[index].function.arguments += call.function.arguments
+          }
+        },
+      })
+      if (epoch !== getPlatformAccount().epoch) throw new Error('account_changed')
+      const message = reply.data?.choices?.[0]?.message
+      if (message) {
+        if (typeof message.content === 'string') { content = message.content; ai.content += content }
+        if (typeof message.reasoning_content === 'string') reasoning = message.reasoning_content
+        if (message.tool_calls) {
+          if (!Array.isArray(message.tool_calls)) throw new Error('tool_not_supported')
+          calls.push(...message.tool_calls.map(normalizeOfficialToolCall))
+        }
+      }
+      const assistantMessage = { role: 'assistant', content: calls.length ? content || null : content }
+      if (reasoning !== undefined) assistantMessage.reasoning_content = reasoning
+      if (calls.length) assistantMessage.tool_calls = calls
+      turnContext.push(assistantMessage)
+      if (!calls.length) break
+      messages.push(assistantMessage)
+      for (const call of calls) {
+        if (controller.signal.aborted || epoch !== getPlatformAccount().epoch) throw new Error('cancelled')
+        if (!tools.some(tool => tool.function.name === call.function.name)) throw new Error('tool_not_supported')
+        let args
+        try { args = JSON.parse(call.function.arguments || '{}') } catch { throw new Error('tool_not_supported') }
+        const entry = { name: call.function.name, args, result: null, approved: true, pending: true }
+        toolHistory.push(entry); ai.toolHistory = toolHistory; renderMessages()
+        const result = await executeToolWithSafety(call.function.name, args, call)
+        Object.assign(entry, result, { pending: false })
+        if (controller.signal.aborted || epoch !== getPlatformAccount().epoch) throw new Error('cancelled')
+        const toolMessage = { role: 'tool', tool_call_id: call.id, content: typeof result.result === 'string' ? result.result : JSON.stringify(result.result) }
+        messages.push(toolMessage)
+        turnContext.push(toolMessage)
+        renderMessages(); saveSessions()
+      }
+      if (round === maxRounds - 1) throw new Error('tool_round_limit')
+    }
+    ai._platformContextVersion = 1
+    ai._platformContextModel = model.id
+    ai._platformContext = turnContext
+    _officialNotice = t('platform.request.settled')
+  } catch (error) {
+    user._platformIncomplete = true
+    ai._platformIncomplete = true
+    const received = error.responseData?.choices?.[0]?.message?.content
+    if (typeof received === 'string' && !ai.content) ai.content = received
+    const text = platformErrorText(error)
+    ai.content += `${ai.content ? '\n\n' : ''}${text}`
+    _officialNotice = text
+    setSessionStatus(session.id, 'error')
+    // 官方失败仅查询原操作；不加入自有 Key 重试栏或备用模型队列。
+    if (error.operationId) ai._platformOperationId = error.operationId
+  } finally {
+    _isStreaming = false
+    _abortController = null
+    session.updatedAt = Date.now()
+    if (getSessionStatus(session.id) !== 'error') setSessionStatus(session.id, 'idle')
+    flushSave(); renderMessages(); renderSessionList(); renderOfficialControls()
+    if (_sendBtn) _sendBtn.innerHTML = sendIcon()
+  }
+}
+
 // ── 发送消息 ──
 function sendMessage(text) {
+  if (_assistantChannel === 'official') {
+    if (_isStreaming) { toast(t('platform.errors.request_pending'), 'warning'); return }
+    void sendOfficialMessage(text)
+    return
+  }
   const hasContent = text.trim() || _pendingImages.length > 0
   if (!hasContent) return
   // 流式中 → 排队（图片不排队，提示用户）
@@ -5071,6 +5319,7 @@ function sendMessage(text) {
 
 // 直接发送（内部使用，不经过队列）
 async function sendMessageDirect(text) {
+  if (_assistantChannel === 'official') return sendOfficialMessage(text)
   const hasContent = text.trim() || _pendingImages.length > 0
   if (!hasContent) return
   if (_isStreaming) {
@@ -5370,6 +5619,12 @@ async function retryAIResponse(session) {
 }
 
 function stopStreaming() {
+  if (_assistantChannel === 'official' && _isStreaming) {
+    _officialNotice = t('platform.cancelRequested')
+    _abortController?.abort()
+    renderOfficialControls()
+    return
+  }
   _isStreaming = false
   if (_abortController) {
     _abortController.abort()
@@ -5466,7 +5721,7 @@ function getAssistantGuideHtml() {
       <div class="ast-guide-badge">${t('assistant.guideTag')}</div>
       <div class="ast-guide-text">
         <b>${t('assistant.guideTitle')}</b>${t('assistant.guideDesc')}
-        <span style="opacity:0.6">${t('assistant.guideHint')}</span>
+        <span class="ast-guide-hint">${t('assistant.guideHint')}</span>
       </div>
       <button class="ast-guide-close" onclick="localStorage.setItem('${AST_GUIDE_KEY}','1');this.closest('.ast-page-guide').remove()">&times;</button>
     </div>
@@ -5500,6 +5755,8 @@ export async function render() {
   if (_sessions.length > 0 && !_currentSessionId) {
     _currentSessionId = _sessions[_sessions.length - 1].id
   }
+  _assistantChannel = getCurrentSession()?.channel === 'official' ? 'official' : 'byok'
+  _officialModel = getCurrentSession()?.officialModel || ''
 
   const page = document.createElement('div')
   page.className = 'page ast-page'
@@ -5535,6 +5792,7 @@ export async function render() {
           </button>
         </div>
       </div>
+      <div class="ast-platform-controls" id="ast-platform-controls"></div>
       <div class="ast-messages" id="ast-messages"></div>
       <div class="ast-queue" id="ast-queue"></div>
       <div class="ast-input-area">
@@ -5558,6 +5816,48 @@ export async function render() {
   _textarea = page.querySelector('#ast-textarea')
   _sendBtn = page.querySelector('#ast-send-btn')
   _sessionListEl = page.querySelector('#ast-session-list')
+  renderOfficialControls()
+  let previousPhase = getPlatformAccount().phase
+  let previousEpoch = getPlatformAccount().epoch
+  _platformUnsubscribe?.()
+  _platformUnsubscribe = onPlatformAccountChange(state => {
+    if (state.epoch !== previousEpoch) { _officialModel = ''; _officialNotice = ''; previousEpoch = state.epoch }
+    const becameBound = state.phase === 'bound' && previousPhase !== 'bound'
+    previousPhase = state.phase
+    renderOfficialControls()
+    if (becameBound && _assistantChannel === 'official') void refreshOfficialModels()
+  })
+  void initPlatformAccount().then(() => { if (_assistantChannel === 'official') void refreshOfficialModels() }).catch(() => {})
+  page.querySelector('#ast-platform-controls').addEventListener('change', event => {
+    if (event.target.id === 'ast-channel') {
+      if (_isStreaming || _messageQueue.length) { renderOfficialControls(); return }
+      if (event.target.value === 'official' && !isTauriRuntime()) return
+      _assistantChannel = event.target.value === 'official' ? 'official' : 'byok'
+      _officialNotice = ''; _officialModel = ''
+      createSession()
+      renderMessages(); renderSessionList(); renderOfficialControls()
+      if (_assistantChannel === 'official') void refreshOfficialModels()
+    } else if (event.target.id === 'ast-official-model') {
+      _officialModel = event.target.value
+      const session = getCurrentSession()
+      if (session?.channel === 'official' && !session.messages.length) { session.officialModel = _officialModel; saveSessions() }
+      renderOfficialControls()
+      void refreshOfficialModels(_officialModel)
+    } else if (event.target.id === 'ast-official-stream') _officialStream = event.target.checked
+  })
+  page.querySelector('#ast-platform-controls').addEventListener('click', async event => {
+    if (event.target.closest('[data-platform-refresh-model]')) { void refreshOfficialModels(); return }
+    if (event.target.closest('[data-platform-switch-chat]')) { page.querySelector('.ast-mode-btn[data-mode="chat"]').click(); return }
+    if (event.target.closest('[data-platform-assistant-settings]')) { showSettings(); return }
+    const recover = event.target.closest('[data-platform-recover]')
+    if (!recover) return
+    recover.disabled = true
+    try {
+      const state = await recoverPlatformRequest(recover.dataset.platformRecover)
+      _officialNotice = t(`platform.request.${state.state}`)
+    } catch (error) { _officialNotice = platformErrorText(error) }
+    renderOfficialControls()
+  })
 
   // 渲染
   renderSessionList()
@@ -5575,7 +5875,7 @@ export async function render() {
 
   // 检查是否有从 setup 页面带来的自动提问
   const autoPrompt = sessionStorage.getItem('assistant-auto-prompt')
-  if (autoPrompt) {
+  if (autoPrompt && _assistantChannel !== 'official') {
     sessionStorage.removeItem('assistant-auto-prompt')
     // 自动切换到执行模式
     if (currentMode() === 'chat') {
@@ -5807,7 +6107,16 @@ export async function render() {
     }
     const item = e.target.closest('.ast-session-item')
     if (item) {
+      const targetSession = _sessions.find(session => session.id === item.dataset.id)
+      if (_isStreaming && (_assistantChannel === 'official' || targetSession?.channel === 'official')) {
+        toast(t('assistant.waitForReply'), 'info')
+        return
+      }
       _currentSessionId = item.dataset.id
+      _assistantChannel = getCurrentSession()?.channel === 'official' ? 'official' : 'byok'
+      _officialModel = getCurrentSession()?.officialModel || ''
+      renderOfficialControls()
+      if (_assistantChannel === 'official') void refreshOfficialModels()
       renderSessionList()
       renderMessages()
       // 切换到正在流式的会话时，启动刷新
@@ -5854,6 +6163,8 @@ function autoResize(textarea) {
 }
 
 export function cleanup() {
+  _platformUnsubscribe?.()
+  _platformUnsubscribe = null
   flushSave()
   stopStreaming()
   stopStreamRefresh()

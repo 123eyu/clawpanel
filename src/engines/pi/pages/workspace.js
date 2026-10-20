@@ -1,4 +1,4 @@
-import { api } from '../../../lib/tauri-api.js'
+import { api, isTauriRuntime } from '../../../lib/tauri-api.js'
 import { t } from '../../../lib/i18n.js'
 import { renderMarkdown } from '../../../lib/markdown.js'
 import { showConfirm } from '../../../components/modal.js'
@@ -7,24 +7,33 @@ import { esc } from '../lib/view.js'
 import { createPiState, applyPiEvent } from '../lib/session-state.js'
 import { conversationEntries, modelOptions, toolPresentation } from '../lib/presentation.js'
 import { createPiDraftStore, piRetryDelay, canRetryPiEvents } from '../lib/workspace-state.js'
+import { consumeOfficialEngineIntent, adoptOfficialEngineIntent, sameEngineAccessIdentity } from '../../../lib/platform-engine-access.js'
+import { onPlatformAccountChange } from '../../../lib/platform-account.js'
 import '../../../style/pi.css'
 
 let teardown = () => {}
 export function cleanup() { teardown() }
 
 export function render() {
+  const accessIntent = consumeOfficialEngineIntent('pi')
   const page = document.createElement('div')
   page.className = 'page pi-workspace-page'
   let disposed = false, generation = 0, rendering = null, operating = false, disconnected = false, composing = false
   let status = null, sessions = [], sessionId = '', cursor = 0, models = [], currentModel = '', draft = '', state = createPiState()
   const compact = window.matchMedia('(max-width: 900px)')
   const drafts = createPiDraftStore(sessionStorage)
+  const modelReady = () => models.some(model => JSON.stringify([model.provider, model.id]) === currentModel)
+  const runtimeErrorText = error => {
+    const message = error?.message || String(error)
+    return /^Pi 最多同时打开 \d+ 个会话，请先关闭空闲会话$/.test(message) ? t('pi.sessionCapacity') : message
+  }
   let search = '', visibleSessions = 100, retryWake = null, backgroundTimer = null, backgroundPending = false
   let historyOpen = !compact.matches
   const dialogDrafts = new Map()
   const resize = () => { historyOpen = !compact.matches; draw() }
   compact.addEventListener('change', resize)
-  teardown = () => { disposed = true; generation++; clearTimeout(rendering); clearInterval(backgroundTimer); retryWake?.(); compact.removeEventListener('change', resize) }
+  let offAccount = () => {}
+  teardown = () => { disposed = true; generation++; clearTimeout(rendering); clearInterval(backgroundTimer); retryWake?.(); compact.removeEventListener('change', resize); offAccount() }
 
   const sessionName = session => !session?.name || session.name === 'New session' ? t('pi.newSession') : session.name.replace(/\s+/g, ' ').trim()
   const sessionDate = session => {
@@ -45,7 +54,7 @@ export function render() {
   }
 
   const emptyHtml = () => {
-    const installed = status?.installed, hasModels = status?.providers?.length
+    const installed = status?.installed, hasModels = status?.providers?.length || status?.official?.models?.length
     const subtitle = !status ? t('pi.busy') : !installed ? t('pi.installToStart') : !hasModels ? t('pi.noModels') : t('pi.workbenchIntro')
     return `<div class="pi-empty"><div class="pi-empty-mark" aria-hidden="true">π</div><h2>${t('pi.readyToWork')}</h2><p>${subtitle}</p>
       ${status && !installed ? `<a class="btn btn-primary" href="#/pi/dashboard">${t('pi.install')}</a>` : installed && !hasModels ? `<a class="btn btn-primary" href="#/model-channels">${t('pi.channels')}</a>` : installed ? `<div class="pi-suggestions">${['suggestExplore', 'suggestReview', 'suggestTest'].map(key => `<button class="pi-suggestion" data-action="suggest" data-prompt="${key}" ${operating ? 'disabled' : ''}>${t('pi.' + key)}</button>`).join('')}</div>` : ''}</div>`
@@ -90,10 +99,12 @@ export function render() {
       <div class="pi-workspace-title"><h1>Pi ${t('pi.workspace')}<span class="pi-preview-badge">${t('pi.experimental')}</span></h1><p title="${esc(workspace)}">${icon('folder', 12)}<span>${esc(workspace || t('pi.workingDirectory'))}</span></p></div>
       <div class="pi-header-actions"><button class="pi-icon-button" data-action="refresh" aria-label="${t('pi.refresh')}" title="${t('pi.refresh')}" ${operating ? 'disabled' : ''}>${icon('refresh-cw', 16)}</button><button class="pi-icon-button" data-action="close" aria-label="${t('pi.closeSession')}" title="${t('pi.closeSession')}" ${!sessionId || operating ? 'disabled' : ''}>${icon('x', 16)}</button><a class="pi-icon-button" href="#/pi/dashboard" aria-label="${t('pi.dashboard')}" title="${t('pi.dashboard')}">${icon('gear', 17)}</a></div></header>
       ${state.error ? `<div class="pi-workspace-alert pi-error" role="alert">${esc(state.error)}</div>` : ''}
+      ${isTauriRuntime() ? `<div class="pi-header-actions"><button class="btn btn-secondary" data-action="connect-official" ${operating || state.busy ? 'disabled' : ''}>${esc(t('platform.official'))}</button><a href="#/account">${esc(t('platform.title'))}</a></div>` : ''}
+      ${models.some(model => model.provider === 'clawpanel-official' && JSON.stringify([model.provider, model.id]) === currentModel && !model.toolCalls) ? `<p class="pi-muted" data-pi-official-tools>${esc(t('platform.engineToolsUnavailable'))}</p>` : ''}
       ${awaiting.length ? `<button class="pi-background-alert" data-action="session" data-id="${esc(awaiting[0].id)}">${esc(t('pi.backgroundApproval', { count: awaiting.length }))}</button>` : ''}
       <div class="pi-workbench"><button class="pi-rail-backdrop" data-action="hide-history" aria-label="${t('pi.hideHistory')}" ${historyOpen ? '' : 'hidden'}></button>
       <aside id="pi-history" class="pi-session-rail" aria-label="${t('pi.sessions')}" ${historyOpen ? '' : 'hidden'}>
-        <button class="btn btn-primary pi-new-session" data-action="new" ${operating || !status?.installed || !status?.providers.length ? 'disabled' : ''}>${icon('plus-circle', 15)}${t('pi.newSession')}</button>
+        <button class="btn btn-primary pi-new-session" data-action="new" ${operating || !status?.installed || !(status?.providers.length || status?.official?.models?.length) ? 'disabled' : ''}>${icon('plus-circle', 15)}${t('pi.newSession')}</button>
         <div class="pi-rail-caption"><span>${t('pi.recentSessions')}</span><span>${sessions.length}</span></div>
         <input id="pi-session-search" class="form-input pi-session-search" aria-label="${t('pi.searchSessions')}" placeholder="${t('pi.searchSessions')}" value="${esc(search)}">
         <div class="pi-session-list">${sessions.length ? filteredSessions.slice(0, visibleSessions).map(session => `<div class="pi-session-row"><button class="pi-session ${session.id === sessionId ? 'active' : ''}" data-action="session" data-id="${esc(session.id)}" aria-current="${session.id === sessionId ? 'true' : 'false'}" title="${esc(sessionName(session))}" ${operating ? 'disabled' : ''}>${icon('message-square', 14)}<span class="pi-session-copy"><span class="pi-session-name">${esc(sessionName(session))}</span><small>${esc(session.pendingDialogs?.length ? t('pi.waiting') : (session.id === sessionId ? state.busy : session.busy) ? t('pi.running') : sessionDate(session))}</small></span></button>${session.running ? `<button class="pi-icon-button" data-action="close-session" data-id="${esc(session.id)}" aria-label="${esc(t('pi.closeNamed', { name: sessionName(session) }))}" ${operating ? 'disabled' : ''}>${icon('x', 12)}</button>` : ''}</div>`).join('') : `<p class="pi-rail-empty">${t('pi.noSessions')}</p>`}${filteredSessions.length > visibleSessions ? `<button class="btn btn-secondary" data-action="more">${t('pi.moreSessions')}</button>` : ''}</div>
@@ -104,8 +115,8 @@ export function render() {
         <div class="pi-chat-bottom"><div class="pi-status" role="status"><span class="pi-status-dot ${readiness}" aria-hidden="true"></span>${!status || operating ? t('pi.busy') : disconnected ? t('pi.connectionLost') : state.dialogs.length ? t('pi.waiting') : state.busy ? t('pi.running') : t('pi.idle')}</div>
         <div class="pi-dialogs">${state.dialogs.map(dialogHtml).join('')}</div>
         <form class="pi-composer"><textarea id="pi-input" rows="2" aria-label="${t('pi.input')}" placeholder="${t('pi.input')}" ${!sessionId ? 'disabled' : ''}>${esc(draft)}</textarea>
-          <div class="pi-composer-footer"><label class="pi-model-picker" title="${t('pi.model')}">${icon('zap', 13)}<select id="pi-model" aria-label="${t('pi.model')}" ${!sessionId || state.busy || operating || disconnected ? 'disabled' : ''}>${choices.length ? choices.map(model => `<option value="${esc(model.value)}" ${currentModel === model.value ? 'selected' : ''}>${esc(model.label)}</option>`).join('') : `<option>${t('pi.selectModel')}</option>`}</select></label>
-          ${state.busy ? `<button type="button" class="pi-send" data-action="stop" aria-label="${t('pi.stop')}" title="${t('pi.stop')}" ${operating || disconnected ? 'disabled' : ''}>${icon('stop', 17)}</button>` : `<button type="submit" class="pi-send" aria-label="${t('pi.send')}" title="${t('pi.send')}" ${!sessionId || operating || !models.length || disconnected || !draft.trim() ? 'disabled' : ''}>${icon('send', 17)}</button>`}</div>
+          <div class="pi-composer-footer"><label class="pi-model-picker" title="${t('pi.model')}">${icon('zap', 13)}<select id="pi-model" aria-label="${t('pi.model')}" ${!sessionId || state.busy || operating || disconnected ? 'disabled' : ''}>${!modelReady() ? `<option value="" selected disabled>${t('pi.selectModel')}</option>` : ''}${choices.map(model => `<option value="${esc(model.value)}" ${currentModel === model.value ? 'selected' : ''}>${esc(model.label)}</option>`).join('')}</select></label>
+          ${state.busy ? `<button type="button" class="pi-send" data-action="stop" aria-label="${t('pi.stop')}" title="${t('pi.stop')}" ${operating || disconnected ? 'disabled' : ''}>${icon('stop', 17)}</button>` : `<button type="submit" class="pi-send" aria-label="${t('pi.send')}" title="${t('pi.send')}" ${!sessionId || operating || !modelReady() || disconnected || !draft.trim() ? 'disabled' : ''}>${icon('send', 17)}</button>`}</div>
         </form><div class="pi-composer-hint"><span>${icon('lock', 10)}${selectedSession?.allowTools ? t('pi.confirmTools') : t('pi.readOnlyTools')}</span><span class="pi-keyboard-hint">${t('pi.keyboardHint')}</span></div></div>
       </section></div>`
     for (const detail of page.querySelectorAll('details[data-detail]')) detail.open = expanded.has(detail.dataset.detail)
@@ -191,14 +202,14 @@ export function render() {
   const perform = async operation => {
     if (operating) return
     operating = true; state.error = ''; draw()
-    try { await operation() } catch (error) { state.error = error?.message || String(error) } finally { operating = false; draw() }
+    try { await operation() } catch (error) { state.error = runtimeErrorText(error) } finally { operating = false; draw() }
   }
   page.addEventListener('input', event => {
     if (event.target.id === 'pi-input') {
       draft = event.target.value; sizeInput()
       if (status) drafts.set(status.root, sessionId, draft)
       const sendButton = page.querySelector('button[type="submit"]')
-      if (sendButton) sendButton.disabled = !sessionId || operating || !models.length || disconnected || !draft.trim()
+      if (sendButton) sendButton.disabled = !sessionId || operating || !modelReady() || disconnected || !draft.trim()
     }
     if (event.target.id === 'pi-session-search') { search = event.target.value; visibleSessions = 100; schedule() }
     const id = event.target.closest('[data-dialog]')?.dataset.dialog
@@ -208,14 +219,15 @@ export function render() {
   page.addEventListener('compositionend', () => { composing = false; schedule() })
   page.addEventListener('change', event => {
     if (event.target.id === 'pi-model') {
+      if (!event.target.value) return
       const [provider, modelId] = JSON.parse(event.target.value)
-      perform(async () => { await api.piCall('set_model', { sessionId, provider, modelId }); currentModel = JSON.stringify([provider, modelId]) })
+      perform(async () => { await api.piCall('set_model', { sessionId, provider, modelId }); await open(sessionId) })
     }
     const id = event.target.closest('[data-dialog]')?.dataset.dialog
     if (id) dialogDrafts.set(id, event.target.value)
   })
   const send = () => perform(async () => {
-    if (!sessionId || !draft.trim() || state.busy || disconnected) return
+    if (!sessionId || !draft.trim() || !modelReady() || state.busy || disconnected) return
     const message = draft, submittedId = sessionId, root = status.root, submission = drafts.begin(root, submittedId, message)
     draft = ''; state.busy = true; draw()
     try {
@@ -252,6 +264,11 @@ export function render() {
         draft = t('pi.' + button.dataset.prompt + 'Prompt'); drafts.set(status.root, sessionId, draft); draw(); page.querySelector('#pi-input').focus()
       }
       else if (action === 'session') await open(button.dataset.id)
+      else if (action === 'connect-official') {
+        await api.piCall('connect_official', {})
+        status = await api.piCall('status')
+        if (sessionId) applySnapshot(await api.piCall('session_state', { sessionId }))
+      }
       else if (action === 'refresh') await refresh()
       else if (action === 'stop') { await api.piCall('abort', { sessionId }); state.busy = false }
       else if ((action === 'close' || action === 'close-session') && await showConfirm(t('pi.closeConfirm'))) {
@@ -269,7 +286,25 @@ export function render() {
       }
     })
   })
-  draw(); refresh().catch(error => { state.error = error?.message || String(error); draw() })
+  offAccount = onPlatformAccountChange(() => {
+    if (accessIntent && !sameEngineAccessIdentity(accessIntent.expected)) {
+      generation++; retryWake?.(); models = []; currentModel = ''; disconnected = true; state.busy = false; state.error = t('platform.engineAccess.intentExpired'); draw()
+    }
+  })
+  draw()
+  ;(async () => {
+    if (!accessIntent) return refresh()
+    status = await api.piCall('status')
+    sessions = await api.piCall('sessions')
+    const connected = await adoptOfficialEngineIntent('pi', accessIntent)
+    if (disposed || !sameEngineAccessIdentity(accessIntent.expected) || !connected.sessionId) throw Error('platform_account_changed')
+    await open(connected.sessionId)
+  })().catch(error => {
+    if (disposed) return
+    const intentExpired = accessIntent && (accessIntent.invalid || !sameEngineAccessIdentity(accessIntent.expected) || (error?.message || String(error)) === 'platform_account_changed')
+    state.error = intentExpired ? t('platform.engineAccess.intentExpired') : runtimeErrorText(error)
+    draw()
+  })
   backgroundTimer = setInterval(async () => {
     if (disposed || operating || document.hidden || backgroundPending) return
     backgroundPending = true

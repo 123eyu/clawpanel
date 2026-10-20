@@ -52,9 +52,10 @@ test('旧密钥不会由推荐路径静默读取或复用', () => {
 
 test('官网模型与安装包品牌、关于页及服务器赞助仍保留', () => {
   assert.match(read('src-tauri/src/commands/site_api.rs'), /https:\/\/claw\.qt\.cool/)
+  assert.match(read('src-tauri/src/commands/openclaw_gateway_official.rs'), /clawpanel-official-gateway/)
   assert.match(read('src-tauri/src/commands/config.rs'), /@qingchencloud\/openclaw-zh/)
   assert.match(read('src/pages/about.js'), /xintian/)
   assert.match(read('src/pages/about.js'), /sponsor-qr-thumb/)
   assert.match(read('README.md'), /https:\/\/www\.ciyundata\.com\/cart\/goods\.htm\?id=267/)
-  assert.match(read('README.md'), /慈云数据/)
+  assert.match(read('README.md'), /慈云数据-香港直连2H2G_99元\/年/)
 })

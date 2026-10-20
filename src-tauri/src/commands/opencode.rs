@@ -18,6 +18,35 @@ const OPENCODE_CONFIG_SCHEMA: &str = "https://opencode.ai/config.json";
 
 static INSTALL_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tauri::command]
+pub async fn opencode_connect_official(port: Option<u16>) -> Result<Value, String> {
+    let _guard = INSTALL_MUTEX
+        .try_lock()
+        .map_err(|_| "official_runtime_maintenance_busy")?;
+    let entry = find_managed_binary().ok_or("official_runtime_not_installed")?;
+    let data_root = super::openclaw_dir()
+        .join("clawpanel")
+        .join("official-engines")
+        .join("opencode");
+    super::deepseek_harness::connect_official_runtime("opencode", port, entry, data_root).await
+}
+
+#[tauri::command]
+pub async fn opencode_disconnect_official(epoch: u64) -> Result<Value, String> {
+    let _guard = INSTALL_MUTEX
+        .try_lock()
+        .map_err(|_| "official_runtime_maintenance_busy")?;
+    super::deepseek_harness::disconnect_official_runtime("opencode", epoch).await
+}
+
+fn ensure_official_stopped() -> Result<(), String> {
+    if super::deepseek_harness::official_runtime_active("opencode") {
+        Err("official_runtime_active".into())
+    } else {
+        Ok(())
+    }
+}
+
 fn root_dir() -> PathBuf {
     super::openclaw_dir().join("clawpanel").join("opencode")
 }
@@ -123,6 +152,13 @@ fn find_managed_binary_at(runtime: &Path) -> Option<PathBuf> {
 
 fn find_managed_binary() -> Option<PathBuf> {
     find_managed_binary_at(&runtime_dir())
+}
+
+pub(super) fn official_installed_local() -> bool {
+    find_managed_binary().is_some()
+}
+pub(super) fn official_managed_entry() -> Option<PathBuf> {
+    find_managed_binary()
 }
 
 fn find_command(name: &str) -> Option<PathBuf> {
@@ -752,6 +788,7 @@ pub async fn opencode_install() -> Result<Value, String> {
     let _guard = INSTALL_MUTEX
         .try_lock()
         .map_err(|_| "OpenCode 安装任务正在运行".to_string())?;
+    ensure_official_stopped()?;
     recover_runtime_swap()?;
     ensure_home()?;
     let registry = configured_npm_registry();
@@ -781,6 +818,7 @@ pub async fn opencode_update() -> Result<Value, String> {
     let _guard = INSTALL_MUTEX
         .try_lock()
         .map_err(|_| "OpenCode 安装、更新或卸载任务正在运行".to_string())?;
+    ensure_official_stopped()?;
     recover_runtime_swap()?;
     let before = opencode_status(Some(OPENCODE_DEFAULT_PORT)).await?;
     if before.get("managedInstalled").and_then(Value::as_bool) != Some(true) {
@@ -854,6 +892,7 @@ pub async fn opencode_uninstall() -> Result<Value, String> {
     let _guard = INSTALL_MUTEX
         .try_lock()
         .map_err(|_| "OpenCode 安装或卸载任务正在运行".to_string())?;
+    ensure_official_stopped()?;
     recover_runtime_swap()?;
     let before = opencode_status(Some(OPENCODE_DEFAULT_PORT)).await?;
     let running = before.get("running").and_then(Value::as_bool) == Some(true);
