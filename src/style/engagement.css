@@ -29,6 +29,8 @@
 .invitation-copy-preview p{margin:5px 0 0;color:var(--text-secondary);font-size:12px;line-height:1.6}
 .invitation-offer{margin:0;padding:12px 14px;border:1px solid var(--border-primary);border-radius:10px;background:var(--bg-secondary);font-size:14px;line-height:1.65}
 .invitation-reward-note,.invitation-support-note{color:var(--text-tertiary);font-size:12px;line-height:1.65;margin:10px 0 0}
+.invitation-generic-share{display:grid;gap:8px;justify-items:start;margin-top:10px;padding:10px 12px;border:1px solid var(--border-primary);border-radius:8px;background:var(--bg-tertiary)}
+.invitation-generic-text{margin:0;color:var(--text-secondary);font-size:12px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere}
 .invitation-feedback{min-height:17px;margin:6px 0;font-size:11px;line-height:1.5}
 .invitation-feedback[data-state=success]{color:var(--success,#16834e)}
 .invitation-feedback[data-state=error]{color:var(--error,#d04444)}

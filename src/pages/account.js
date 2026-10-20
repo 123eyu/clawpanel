@@ -105,12 +105,14 @@ function benefitsView(state) {
 function guestView(state, phase) {
   const waiting = ['authorizing', 'binding', 'reauthorizing'].includes(state.phase)
   return `${renderPlatformOnboarding(state, getPlatformPublicOffer())}<section class="card platform-welcome platform-section" data-platform-guest>
-    <div class="platform-welcome-main"><span class="platform-assistant-mark" aria-hidden="true">${icon('message-square', 23)}</span><h2>${t('platform.guestTitle')}</h2><p>${t('platform.guestIntro')}</p>${assistantLink(true, true)}<p class="form-hint">${t('platform.ownKeyHint')}</p></div>
-    <div class="platform-welcome-account"><h3>${t('platform.signInTitle')}</h3><ul class="platform-benefits">
+    <div class="platform-welcome-main"><span class="platform-assistant-mark" aria-hidden="true">${icon('message-square', 23)}</span><h2>${t('platform.guestTitle')}</h2><p>${t('platform.guestIntro')}</p>
+      <div class="platform-login-actions">${waiting ? `<span class="platform-state" data-state="${escape(state.phase)}"><span class="platform-state-dot" aria-hidden="true"></span>${escape(phase)}</span>${button('login-cancel', 'cancel')}` : `<button type="button" class="btn btn-primary platform-login-cta" data-platform-action="login">${escape(t('platform.login'))}</button>`}</div>
+      <div class="platform-welcome-secondary">${assistantLink(false, true)}<span class="form-hint">${t('platform.ownKeyHint')}</span></div></div>
+    <div class="platform-welcome-account"><ul class="platform-benefits">
       <li>${icon('sparkles', 17)}<div><strong>${t('platform.official')}</strong><p>${t('platform.modelsBenefit')}</p></div></li>
       <li>${icon('bar-chart', 17)}<div><strong>${t('platform.walletTitle')}</strong><p>${t('platform.walletBenefit')}</p></div></li>
       <li>${icon('gift', 17)}<div><strong>${t('platform.invitationTitle')}</strong><p>${t('platform.invitationBenefit')}</p></div></li>
-    </ul><p>${t('platform.signInHint')}</p><div class="platform-actions">${waiting ? button('login-cancel', 'cancel') : button('login', 'login', false, 'data-platform-guest-secondary')}</div></div>
+    </ul><p>${t('platform.signInHint')}</p></div>
   </section><details class="platform-guest-rewards platform-section" data-platform-guest-rewards><summary>${t('platform.onboarding.otherRewards')}</summary>${benefitsView(state)}</details><div class="platform-section"><span class="platform-state" data-platform-account-status data-state="${escape(state.phase)}"><span class="platform-state-dot" aria-hidden="true"></span>${escape(phase)}</span></div>`
 }
 

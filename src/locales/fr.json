@@ -2808,11 +2808,13 @@
     "wechatGroup": "WeChat Group",
     "douyinGroup": "Douyin Group",
     "feishuGroup": "Feishu Group",
+    "telegramGroup": "Telegram Group",
     "communityDesc": "Scan QR code or click link to join, report issues and get help",
     "joinQQ": "Join QQ Group",
     "joinWechat": "Join WeChat Group",
     "joinDouyin": "Join Douyin Group",
     "joinFeishu": "Join Feishu Group",
+    "joinTelegram": "Join Telegram",
     "joinYuanbao": "Yuanbao Community",
     "joinDiscord": "Rejoindre Discord",
     "discordDesc": "Communauté internationale",
@@ -3303,6 +3305,7 @@
     "offerSimulation": "This is a demonstration campaign, not a real credit grant. Check the website for the actual policy.",
     "rewardNote": "Invitation rewards follow website campaign rules. Qualification is not payment; your account balance shows the credits available to use.",
     "genericShare": "Share project introduction",
+    "genericCopy": "Copy project intro",
     "genericText": "Try ClawPanel to manage AI engines and models, with a built-in AI assistant. The project is open source. Learn more:",
     "genericNote": "The project introduction does not attribute an invitation. A Star supports the open-source project and does not award credits.",
     "communityTitle": "Community and project support",
@@ -3326,6 +3329,8 @@
     "douyinLabel": "Groupe Douyin",
     "feishuAlt": "Groupe communautaire Feishu",
     "feishuLabel": "Groupe Feishu",
+    "telegramAlt": "Groupe communautaire Telegram",
+    "telegramLabel": "Groupe Telegram",
     "dismissToday": "Ne plus afficher aujourd’hui"
   },
   "diagnose": {
@@ -6105,6 +6110,12 @@
       "reauth_required": "Authorization expired. Connect again",
       "storage_error": "System secure storage is unavailable"
     },
+    "connection": {
+      "waiting": "Waiting for website confirmation",
+      "waitingHint": "Check your account in your system browser and select “Connect and return to app”.",
+      "finishing": "Finishing connection",
+      "finishingHint": "The website confirmed. Checking this installation and account status."
+    },
     "control": {
       "active": "Available on request",
       "binding_required": "Connect this app first",
@@ -6139,6 +6150,19 @@
       "released": "Original request released"
     },
     "errors": {
+      "connection_rate_limited": "Too many connection attempts. Try again later.",
+      "connection_pending_limit": "A connection is still pending. Complete or cancel it first.",
+      "connection_capacity": "The website connection service is busy. Try again later.",
+      "connection_not_found": "This connection is unavailable. Connect again.",
+      "connection_expired": "The connection timed out. Connect again.",
+      "connection_cancelled": "Connection cancelled.",
+      "connection_rejected": "The website declined this connection.",
+      "connection_closed": "This connection has ended. Check your account status.",
+      "device_already_bound": "This installation belongs to another account. Unlink it from that account first.",
+      "device_limit_exceeded": "The account device limit is reached. Manage devices on the website.",
+      "oauth_timeout": "The connection timed out. Connect again.",
+      "access_denied": "This connection was not approved.",
+      "slow_down": "Too many requests. Try again later.",
       "official_models_unavailable": "No official models are available for this engine. Refresh your account or use your own key.",
       "official_runtime_not_installed": "Install this engine before connecting official models.",
       "context_limit_exceeded": "The content or tools exceed this model’s capacity. Shorten the content or choose another model.",
@@ -6172,26 +6196,7 @@
       "cancelled": "Stop requested. Charges depend on the final state.",
       "provider_request_rejected": "The model service rejected the original request. Check its status.",
       "tool_not_supported": "This model does not support these tools. Switch to Chat mode.",
-      "registration_trial_unavailable": "Trial refresh failed. The previous value is retained.",
-      "connection_rate_limited": "Too many connection attempts. Try again later.",
-      "connection_pending_limit": "A connection is still pending. Complete or cancel it first.",
-      "connection_capacity": "The website connection service is busy. Try again later.",
-      "connection_not_found": "This connection is unavailable. Connect again.",
-      "connection_expired": "The connection timed out. Connect again.",
-      "connection_cancelled": "Connection cancelled.",
-      "connection_rejected": "The website declined this connection.",
-      "connection_closed": "This connection has ended. Check your account status.",
-      "device_already_bound": "This installation belongs to another account. Unlink it from that account first.",
-      "device_limit_exceeded": "The account device limit is reached. Manage devices on the website.",
-      "oauth_timeout": "The connection timed out. Connect again.",
-      "access_denied": "This connection was not approved.",
-      "slow_down": "Too many requests. Try again later."
-    },
-    "connection": {
-      "waiting": "Waiting for website confirmation",
-      "waitingHint": "Check your account in your system browser and select “Connect and return to app”.",
-      "finishing": "Finishing connection",
-      "finishingHint": "The website confirmed. Checking this installation and account status."
+      "registration_trial_unavailable": "Trial refresh failed. The previous value is retained."
     }
   }
 }

@@ -2808,11 +2808,13 @@
     "wechatGroup": "微信交流群",
     "douyinGroup": "抖音交流群",
     "feishuGroup": "飞书交流群",
+    "telegramGroup": "Telegram 交流群",
     "communityDesc": "扫码或点击链接加入交流群，反馈问题、获取帮助",
     "joinQQ": "加入 QQ 群",
     "joinWechat": "加入微信群",
     "joinDouyin": "加入抖音群",
     "joinFeishu": "加入飞书群",
+    "joinTelegram": "加入 Telegram",
     "joinYuanbao": "元宝派社群",
     "joinDiscord": "加入 Discord",
     "discordDesc": "国际社区",
@@ -3303,6 +3305,7 @@
     "offerSimulation": "当前为演示活动，不代表真实积分发放。请到官网查看实际政策。",
     "rewardNote": "邀请奖励按官网活动规则结算；达标不等于到账，可用积分以账户余额为准。",
     "genericShare": "分享项目介绍",
+    "genericCopy": "复制项目介绍",
     "genericText": "推荐 ClawPanel：管理多个 AI 内核、配置模型，使用内置 AI 助手。项目开源，详情见官网：",
     "genericNote": "项目介绍不含专属邀请关系。Star 仅支持开源项目，不发放积分。",
     "communityTitle": "社区与项目支持",
@@ -3326,6 +3329,8 @@
     "douyinLabel": "抖音群",
     "feishuAlt": "飞书交流群",
     "feishuLabel": "飞书群",
+    "telegramAlt": "Telegram 交流群",
+    "telegramLabel": "Telegram 群",
     "dismissToday": "今日不再弹窗"
   },
   "diagnose": {
@@ -6105,6 +6110,12 @@
       "reauth_required": "授权已失效，请重新连接",
       "storage_error": "系统安全存储暂不可用"
     },
+    "connection": {
+      "waiting": "等待官网确认",
+      "waitingHint": "在系统浏览器核对账号并点击“连接并返回客户端”。",
+      "finishing": "正在完成连接",
+      "finishingHint": "官网已确认，正在核对本机连接与账户状态。"
+    },
     "control": {
       "active": "可申请使用",
       "binding_required": "需要连接客户端",
@@ -6139,6 +6150,19 @@
       "released": "原请求已释放"
     },
     "errors": {
+      "connection_rate_limited": "连接请求较频繁，请稍后重试。",
+      "connection_pending_limit": "仍有连接等待确认，请先完成或取消。",
+      "connection_capacity": "官网连接服务繁忙，请稍后重试。",
+      "connection_not_found": "连接事务不可用，请重新连接。",
+      "connection_expired": "连接已超时，请重新连接。",
+      "connection_cancelled": "连接已取消。",
+      "connection_rejected": "官网已拒绝本次连接。",
+      "connection_closed": "本次连接已结束，请核对账户状态。",
+      "device_already_bound": "此安装已连接其他账号，请先在原账号解除绑定。",
+      "device_limit_exceeded": "账号设备数量已达上限，请在官网管理设备。",
+      "oauth_timeout": "连接已超时，请重新连接。",
+      "access_denied": "本次连接未获批准。",
+      "slow_down": "请求较频繁，请稍后重试。",
       "official_models_unavailable": "此内核暂无可用官方模型。请刷新账户，或继续使用自有 Key。",
       "official_runtime_not_installed": "请先安装此内核，再连接官方模型。",
       "context_limit_exceeded": "内容或工具超出此模型的处理范围。请缩短内容，或选择其他模型。",
@@ -6172,26 +6196,7 @@
       "cancelled": "已申请停止，费用以最终状态为准。",
       "provider_request_rejected": "模型服务拒绝了原请求。请核对原请求状态。",
       "tool_not_supported": "此模型不支持当前工具，请切换到聊天模式。",
-      "registration_trial_unavailable": "注册体验刷新失败，保留上次显示。",
-      "connection_rate_limited": "连接请求较频繁，请稍后重试。",
-      "connection_pending_limit": "仍有连接等待确认，请先完成或取消。",
-      "connection_capacity": "官网连接服务繁忙，请稍后重试。",
-      "connection_not_found": "连接事务不可用，请重新连接。",
-      "connection_expired": "连接已超时，请重新连接。",
-      "connection_cancelled": "连接已取消。",
-      "connection_rejected": "官网已拒绝本次连接。",
-      "connection_closed": "本次连接已结束，请核对账户状态。",
-      "device_already_bound": "此安装已连接其他账号，请先在原账号解除绑定。",
-      "device_limit_exceeded": "账号设备数量已达上限，请在官网管理设备。",
-      "oauth_timeout": "连接已超时，请重新连接。",
-      "access_denied": "本次连接未获批准。",
-      "slow_down": "请求较频繁，请稍后重试。"
-    },
-    "connection": {
-      "waiting": "等待官网确认",
-      "waitingHint": "在系统浏览器核对账号并点击“连接并返回客户端”。",
-      "finishing": "正在完成连接",
-      "finishingHint": "官网已确认，正在核对本机连接与账户状态。"
+      "registration_trial_unavailable": "注册体验刷新失败，保留上次显示。"
     }
   }
 }

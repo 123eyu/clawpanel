@@ -800,6 +800,10 @@ function renderCommunity(page) {
         <img src="https://qt.cool/c/feishu/qr.png" alt="${t('about.feishuGroup')}" style="width:140px;height:140px;border-radius:var(--radius-md);border:1px solid var(--border-primary);object-fit:contain;background:#fff">
         <div style="font-size:var(--font-size-sm);margin-top:8px;color:var(--text-secondary)">${t('about.feishuGroup')}</div>
       </div>
+      <div style="text-align:center">
+        <img src="https://claw.qt.cool/api/qrcodes/6/image" alt="${t('about.telegramGroup')}" style="width:140px;height:140px;border-radius:var(--radius-md);border:1px solid var(--border-primary);object-fit:contain;background:#fff">
+        <div style="font-size:var(--font-size-sm);margin-top:8px;color:var(--text-secondary)">${t('about.telegramGroup')}</div>
+      </div>
       <div style="flex:1;min-width:200px;display:flex;flex-direction:column;gap:8px;padding-top:4px">
         <div style="font-size:var(--font-size-sm);color:var(--text-secondary)">${t('about.communityWelcome')}</div>
         <div style="font-size:var(--font-size-sm);color:var(--text-secondary);font-style:italic">${t('about.communityWelcomeIntl')}</div>
@@ -810,7 +814,9 @@ function renderCommunity(page) {
           <a class="btn btn-primary btn-sm" href="https://qt.cool/c/OpenClawWx" target="_blank" rel="noopener">${t('about.joinWechat')}</a>
           <a class="btn btn-primary btn-sm" href="https://qt.cool/c/OpenClawDY" target="_blank" rel="noopener">${t('about.joinDouyin')}</a>
           <a class="btn btn-primary btn-sm" href="https://qt.cool/c/feishu" target="_blank" rel="noopener">${t('about.joinFeishu')}</a>
+          <a class="btn btn-primary btn-sm" href="https://t.me/+rjRE3PgVL9tmOGZk" target="_blank" rel="noopener">${t('about.joinTelegram')}</a>
           <a class="btn btn-secondary btn-sm" href="https://yb.tencent.com/gp/i/IIGXzcMcdh84" target="_blank" rel="noopener">${t('about.joinYuanbao')}</a>
+          <a class="btn btn-secondary btn-sm" href="https://claw.qt.cool" target="_blank" rel="noopener">${t('about.linkWebsite')}</a>
         </div>
         <div style="font-size:var(--font-size-xs);color:var(--text-tertiary);margin-top:8px">
           ${t('about.communityNote')}

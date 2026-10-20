@@ -156,11 +156,13 @@ export function showInvitationDialog({ manual = true } = {}) {
         `}
         ${!member ? `<p class="invitation-reward-note">${escape(t('engagement.rewardNote'))}</p>` : ''}
         <p class="invitation-feedback" data-invitation-feedback data-state="${feedback?.state || ''}" role="status" aria-live="polite">${feedback ? escape(t(feedback.key)) : ''}</p>
-        <section class="invitation-support-section"><h3>${escape(t('engagement.supportTitle'))}</h3><div class="invitation-support"><a data-invitation-star href="${STAR_URL}" target="_blank" rel="noopener noreferrer">☆ ${escape(t('engagement.starTitle'))} ↗</a><button type="button" class="btn btn-secondary" data-invitation-generic>${escape(t('engagement.genericShare'))}</button></div>
+        <section class="invitation-support-section"><h3>${escape(t('engagement.supportTitle'))}</h3><div class="invitation-support"><a data-invitation-star href="${STAR_URL}" target="_blank" rel="noopener noreferrer">☆ ${escape(t('engagement.starTitle'))} ↗</a></div>
         <p class="invitation-support-note">${escape(t('engagement.genericNote'))}</p>
+        <div class="invitation-generic-share"><p class="invitation-generic-text">${escape(genericShareText())}</p><button type="button" class="btn btn-secondary btn-sm" data-invitation-generic-copy>${escape(t('engagement.genericCopy'))}</button></div>
         <details class="invitation-community" data-invitation-disclosure="community" ${disclosureState.community ? 'open' : ''}><summary data-invitation-community-summary>${escape(t('engagement.communityTitle'))}</summary><nav aria-label="${escape(t('engagement.communityTitle'))}">${[
           ['https://qt.cool/c/OpenClaw', 'qqLabel'], ['https://qt.cool/c/OpenClawWx', 'wechatLabel'],
           ['https://qt.cool/c/OpenClawDY', 'douyinLabel'], ['https://qt.cool/c/feishu', 'feishuLabel'],
+          ['https://t.me/+rjRE3PgVL9tmOGZk', 'telegramLabel'],
         ].map(([url, key]) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${escape(t(`engagement.${key}`))} ↗</a>`).join('')}</nav></details></section>
         <footer class="invitation-footer"><button type="button" data-invitation-dismiss>${escape(t('engagement.dismissToday'))}</button></footer>
       </section>`
@@ -191,6 +193,8 @@ export function showInvitationDialog({ manual = true } = {}) {
     finally { posterOpening = false }
   }
 
+  const genericShareText = () => `${t('engagement.genericText')}\n${PROJECT_URL}`
+
   async function copyText(kind) {
     if (busy) return
     const state = platformAccount.getPlatformAccount()
@@ -198,7 +202,7 @@ export function showInvitationDialog({ manual = true } = {}) {
     const url = ownInvitation(state)
     if (kind !== 'generic' && !url) { feedback = null; draw(); return }
     const copy = invitationCopy(state)
-    const text = kind === 'link' ? url : kind === 'personal' ? [copy.title, copy.subtitle, url].filter(value => value.trim()).join('\n\n') : `${t('engagement.genericText')}\n${PROJECT_URL}`
+    const text = kind === 'link' ? url : kind === 'personal' ? [copy.title, copy.subtitle, url].filter(value => value.trim()).join('\n\n') : genericShareText()
     busy = true
     try {
       if (!navigator.clipboard?.writeText) throw new Error('clipboard_unavailable')
@@ -217,7 +221,7 @@ export function showInvitationDialog({ manual = true } = {}) {
     if (target?.matches('[data-invitation-poster]')) { await openPoster(); return }
     if (target?.matches('[data-invitation-copy-link]')) { await copyText('link'); return }
     if (target?.matches('[data-invitation-copy-text]')) { await copyText('personal'); return }
-    if (target?.matches('[data-invitation-generic]')) { await copyText('generic'); return }
+    if (target?.matches('[data-invitation-generic-copy]')) { await copyText('generic'); return }
     if (target?.matches('[data-invitation-official]') && !busy) {
       const before = identity(platformAccount.getPlatformAccount())
       busy = true

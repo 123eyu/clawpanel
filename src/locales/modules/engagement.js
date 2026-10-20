@@ -90,6 +90,7 @@ export default {
   offerSimulation: _('当前为演示活动，不代表真实积分发放。请到官网查看实际政策。', 'This is a demonstration campaign, not a real credit grant. Check the website for the actual policy.'),
   rewardNote: _('邀请奖励按官网活动规则结算；达标不等于到账，可用积分以账户余额为准。', 'Invitation rewards follow website campaign rules. Qualification is not payment; your account balance shows the credits available to use.'),
   genericShare: _('分享项目介绍', 'Share project introduction'),
+  genericCopy: _('复制项目介绍', 'Copy project intro', '複製項目介紹'),
   genericText: _('推荐 ClawPanel：管理多个 AI 内核、配置模型，使用内置 AI 助手。项目开源，详情见官网：', 'Try ClawPanel to manage AI engines and models, with a built-in AI assistant. The project is open source. Learn more:'),
   genericNote: _('项目介绍不含专属邀请关系。Star 仅支持开源项目，不发放积分。', 'The project introduction does not attribute an invitation. A Star supports the open-source project and does not award credits.'),
   communityTitle: _('社区与项目支持', 'Community and project support'),
@@ -113,5 +114,7 @@ export default {
   douyinLabel: _('抖音群', 'Douyin Group', '抖音群', 'Douyin グループ', '도우인 그룹', 'Nhóm Douyin', 'Grupo de Douyin', 'Grupo Douyin', 'Группа Douyin', 'Groupe Douyin', 'Douyin-Gruppe'),
   feishuAlt: _('飞书交流群', 'Feishu community group', '飛書交流群', 'Feishu コミュニティグループ', '피슈 커뮤니티 그룹', 'Nhóm cộng đồng Feishu', 'Grupo de comunidad Feishu', 'Grupo da comunidade Feishu', 'Сообщество Feishu', 'Groupe communautaire Feishu', 'Feishu-Community-Gruppe'),
   feishuLabel: _('飞书群', 'Feishu Group', '飛書群', 'Feishu グループ', '피슈 그룹', 'Nhóm Feishu', 'Grupo de Feishu', 'Grupo Feishu', 'Группа Feishu', 'Groupe Feishu', 'Feishu-Gruppe'),
+  telegramAlt: _('Telegram 交流群', 'Telegram community group', 'Telegram 交流群', 'Telegram コミュニティグループ', 'Telegram 커뮤니티 그룹', 'Nhóm cộng đồng Telegram', 'Grupo de comunidad Telegram', 'Grupo da comunidade Telegram', 'Сообщество Telegram', 'Groupe communautaire Telegram', 'Telegram-Community-Gruppe'),
+  telegramLabel: _('Telegram 群', 'Telegram Group', 'Telegram 群', 'Telegram グループ', 'Telegram 그룹', 'Nhóm Telegram', 'Grupo de Telegram', 'Grupo Telegram', 'Группа Telegram', 'Groupe Telegram', 'Telegram-Gruppe'),
   dismissToday: _('今日不再弹窗', 'Do not show again today', '今日不再彈窗', '今日はもう表示しない', '오늘은 다시 보지 않기', 'Hôm nay không hiển thị lại', 'No volver a mostrar hoy', 'Não mostrar novamente hoje', 'Не показывать снова сегодня', 'Ne plus afficher aujourd’hui', 'Heute nicht mehr anzeigen'),
 }
