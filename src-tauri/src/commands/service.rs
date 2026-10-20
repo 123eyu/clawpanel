@@ -1970,18 +1970,30 @@ mod platform {
         Ok(())
     }
 
-    /// 优先使用 OpenClaw 官方服务启动；失败时由上层回退旧脚本启动。
-    async fn start_service_official(port: u16, before_pid: Option<u32>) -> Result<u32, String> {
-        ensure_official_gateway_service(port).await?;
-        official_gateway_json(&["gateway", "start", "--json"], Duration::from_secs(30)).await?;
+    /// 官方服务启动失败原因：Unavailable 可回退旧脚本，NotReady 说明服务已接管、不能再重复拉起。
+    enum OfficialStartFailure {
+        Unavailable(String),
+        NotReady(String),
+    }
+
+    /// 优先使用 OpenClaw 官方服务启动；失败时由上层决定是否回退旧脚本。
+    async fn start_service_official(
+        port: u16,
+        _before_pid: Option<u32>,
+    ) -> Result<Option<u32>, OfficialStartFailure> {
+        ensure_official_gateway_service(port)
+            .await
+            .map_err(OfficialStartFailure::Unavailable)?;
+        official_gateway_json(&["gateway", "start", "--json"], Duration::from_secs(30))
+            .await
+            .map_err(OfficialStartFailure::Unavailable)?;
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(300)).await;
             let (running, pid) = check_service_status(0, "");
-            if let (true, Some(current_pid)) = (running, pid) {
-                if Some(current_pid) != before_pid && is_process_alive(current_pid) {
-                    return Ok(current_pid);
-                }
+            // 端口可达即视为启动成功；PID 仅作为停止时的增强信息，不能因查询失败误判。
+            if running {
+                return Ok(pid);
             }
         }
         let status = official_gateway_json(
@@ -1992,11 +2004,12 @@ mod platform {
         .unwrap_or(serde_json::Value::Null);
         let excerpt = official_gateway_log_excerpt(&status);
         let reason = "官方 Gateway 服务启动超时";
-        Err(if excerpt.is_empty() {
+        let detail = if excerpt.is_empty() {
             reason.to_string()
         } else {
             format!("{reason}\n\n{excerpt}")
-        })
+        };
+        Err(OfficialStartFailure::NotReady(detail))
     }
 
     /// 普通Gateway启停必须后台执行；保留日志runner，不创建可见控制台。
@@ -2011,13 +2024,10 @@ mod platform {
 
         let (running, pid) = check_service_status(0, "");
         if running {
-            if pid.is_some() {
-                return Ok(());
-            }
-            return Err(format!(
-                "端口 {} 被未知进程占用，请先关闭占用该端口的程序",
-                crate::commands::gateway_listen_port()
-            ));
+            // 官方服务进程的 PID 可能查询不到；端口已通即视为运行中，避免误报占用。
+            super::write_gateway_owner(pid)?;
+            *ACTIVE_GATEWAY_CHILD.lock().unwrap() = pid;
+            return Ok(());
         }
 
         cleanup_zombie_gateway_processes();
@@ -2028,10 +2038,15 @@ mod platform {
         // 优先走 OpenClaw 官方服务方案（Windows 计划任务），由 CLI 负责安装、启动与日志。
         let official_error = match start_service_official(port, before_pid).await {
             Ok(current_pid) => {
-                *ACTIVE_GATEWAY_CHILD.lock().unwrap() = Some(current_pid);
+                if let Some(current_pid) = current_pid {
+                    super::write_gateway_owner(Some(current_pid))?;
+                    *ACTIVE_GATEWAY_CHILD.lock().unwrap() = Some(current_pid);
+                }
                 return Ok(());
             }
-            Err(error) => error,
+            // 服务已被官方接管但尚未就绪时不能再回退旧脚本，否则会重复拉起。
+            Err(OfficialStartFailure::NotReady(detail)) => return Err(detail),
+            Err(OfficialStartFailure::Unavailable(error)) => error,
         };
 
         let cli = crate::utils::resolve_openclaw_cli_path().unwrap_or_else(|| "openclaw".into());

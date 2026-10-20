@@ -23,6 +23,7 @@
 - Windows 版 Gateway 启动改用 OpenClaw 官方服务方案：优先通过官方 gateway install / start / status 注册并启动计划任务（隐藏 VBS 启动器），沿用官方 Gateway 日志；官方服务不可用时自动回退旧的隐藏启动脚本。
 - 停止 Gateway 时优先调用官方 gateway stop，保留端口/PID 兜底，兼容旧版本启动的实例。
 - 启动失败诊断会附带官方 Gateway 日志末尾内容，继续使用 UTF-8/UTF-16/GBK 统一解码。
+- 修复官方服务已拉起但进程 PID 查询失败时误判超时、继而重复回退旧脚本造成重复启动的问题；端口可达即视为启动成功，失败分类区分“可回退”与“已被服务接管”。
 
 ### 验证 (Testing)
 
