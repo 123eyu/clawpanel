@@ -18,6 +18,7 @@ export default {
   namePlaceholder: _('例如：我的 OpenAI', 'e.g. My OpenAI', '例如：我的 OpenAI'),
   preset: _('服务商预设', 'Provider Preset', '服務商預設'),
   presetCustom: _('自定义', 'Custom', '自訂'),
+  presetExistingCustom: _('现有配置（自定义）', 'Existing configuration (custom)', '現有設定（自訂）'),
   presetHint: _('选择预设会自动填入接口地址与 API 类型', 'Picking a preset fills in the base URL and API type', '選擇預設會自動填入介面位址與 API 類型'),
   baseUrl: _('接口地址 (Base URL)', 'Base URL', '介面位址 (Base URL)'),
   apiType: _('API 类型', 'API Type', 'API 類型'),
