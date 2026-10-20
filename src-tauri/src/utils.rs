@@ -562,7 +562,7 @@ pub fn decode_text(bytes: &[u8]) -> String {
     }
     // 无 BOM 的 UTF-16LE：每个 ASCII 字符后紧跟 NUL，按奇数字节 NUL 密度判断。
     if bytes.len() >= 4
-        && bytes.len() % 2 == 0
+        && bytes.len().is_multiple_of(2)
         && bytes.iter().skip(1).step_by(2).filter(|b| **b == 0).count() * 4 > bytes.len()
     {
         let (text, _, _) = encoding_rs::UTF_16LE.decode(bytes);
