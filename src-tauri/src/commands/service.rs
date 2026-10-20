@@ -1888,6 +1888,117 @@ mod platform {
             .collect()
     }
 
+    /// 通过 OpenClaw 官方 CLI 读取 JSON 输出；失败时由调用方回退旧启动方式。
+    async fn official_gateway_json(
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        let mut cmd = crate::utils::openclaw_command_async();
+        cmd.args(args).stdin(std::process::Stdio::null());
+        let output = tokio::time::timeout(timeout, cmd.output())
+            .await
+            .map_err(|_| "官方 CLI 超时".to_string())?
+            .map_err(|error| format!("官方 CLI 调用失败: {error}"))?;
+        let stdout = crate::utils::decode_text(&output.stdout);
+        if !output.status.success() {
+            let stderr = crate::utils::decode_text(&output.stderr);
+            let detail = if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            };
+            return Err(format!("官方 CLI 返回失败: {detail}"));
+        }
+        let start = stdout.find('{').ok_or("官方 CLI 未返回 JSON")?;
+        serde_json::from_str(&stdout[start..])
+            .map_err(|error| format!("官方 CLI JSON 解析失败: {error}"))
+    }
+
+    /// 读取官方服务登记的命令行端口，用于判断是否需要重新安装服务。
+    fn official_service_port(status: &serde_json::Value) -> Option<u16> {
+        let args = status
+            .pointer("/service/command/programArguments")?
+            .as_array()?;
+        let mut index = 0;
+        while index + 1 < args.len() {
+            if args[index].as_str() == Some("--port") {
+                return args[index + 1]
+                    .as_str()
+                    .and_then(|value| value.parse().ok());
+            }
+            index += 1;
+        }
+        status
+            .pointer("/service/command/environment/OPENCLAW_GATEWAY_PORT")
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.parse().ok())
+    }
+
+    /// 官方 Gateway 日志路径由 CLI 状态返回；截取末尾作为启动失败诊断。
+    fn official_gateway_log_excerpt(status: &serde_json::Value) -> String {
+        let Some(path) = status.get("logFile").and_then(|value| value.as_str()) else {
+            return String::new();
+        };
+        let excerpt = super::read_file_excerpt_since(std::path::Path::new(path), 0, 8192);
+        if excerpt.is_empty() {
+            String::new()
+        } else {
+            format!("最近一次官方 Gateway 日志:\n{excerpt}")
+        }
+    }
+
+    /// 确保官方服务已安装且端口匹配；仅在缺失或端口变化时调用 install。
+    async fn ensure_official_gateway_service(port: u16) -> Result<(), String> {
+        let status = official_gateway_json(
+            &["gateway", "status", "--json", "--no-probe"],
+            Duration::from_secs(15),
+        )
+        .await?;
+        let loaded = status
+            .pointer("/service/loaded")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        if loaded && official_service_port(&status) == Some(port) {
+            return Ok(());
+        }
+        let port_text = port.to_string();
+        let mut args = vec!["gateway", "install", "--json", "--port", port_text.as_str()];
+        if loaded {
+            args.push("--force");
+        }
+        official_gateway_json(&args, Duration::from_secs(30)).await?;
+        Ok(())
+    }
+
+    /// 优先使用 OpenClaw 官方服务启动；失败时由上层回退旧脚本启动。
+    async fn start_service_official(port: u16, before_pid: Option<u32>) -> Result<u32, String> {
+        ensure_official_gateway_service(port).await?;
+        official_gateway_json(&["gateway", "start", "--json"], Duration::from_secs(30)).await?;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let (running, pid) = check_service_status(0, "");
+            if let (true, Some(current_pid)) = (running, pid) {
+                if Some(current_pid) != before_pid && is_process_alive(current_pid) {
+                    return Ok(current_pid);
+                }
+            }
+        }
+        let status = official_gateway_json(
+            &["gateway", "status", "--json", "--no-probe"],
+            Duration::from_secs(15),
+        )
+        .await
+        .unwrap_or(serde_json::Value::Null);
+        let excerpt = official_gateway_log_excerpt(&status);
+        let reason = "官方 Gateway 服务启动超时";
+        Err(if excerpt.is_empty() {
+            reason.to_string()
+        } else {
+            format!("{reason}\n\n{excerpt}")
+        })
+    }
+
     /// 普通Gateway启停必须后台执行；保留日志runner，不创建可见控制台。
     pub async fn start_service_impl(_label: &str) -> Result<(), String> {
         if !is_cli_installed() {
@@ -1912,6 +2023,17 @@ mod platform {
         cleanup_zombie_gateway_processes();
 
         let before_pid = *LAST_KNOWN_GATEWAY_PID.lock().unwrap();
+        let port = crate::commands::gateway_listen_port();
+
+        // 优先走 OpenClaw 官方服务方案（Windows 计划任务），由 CLI 负责安装、启动与日志。
+        let official_error = match start_service_official(port, before_pid).await {
+            Ok(current_pid) => {
+                *ACTIVE_GATEWAY_CHILD.lock().unwrap() = Some(current_pid);
+                return Ok(());
+            }
+            Err(error) => error,
+        };
+
         let cli = crate::utils::resolve_openclaw_cli_path().unwrap_or_else(|| "openclaw".into());
         let openclaw_dir = crate::commands::openclaw_dir();
         let config_path = openclaw_dir.join("openclaw.json");
@@ -1960,17 +2082,19 @@ mod platform {
             {
                 if !status.success() {
                     return Err(format!(
-                        "Gateway 启动失败（runner 退出码 {:?}），请查看 gateway.err.log\n{}",
+                        "Gateway 启动失败（runner 退出码 {:?}），请查看 gateway.err.log\n{}\n\n[官方服务启动失败]\n{}",
                         status.code(),
-                        gateway_start_log_tail(&openclaw_dir)
+                        gateway_start_log_tail(&openclaw_dir),
+                        official_error
                     ));
                 }
             }
         }
 
         Err(format!(
-            "Gateway 启动超时，请查看 gateway.err.log\n{}",
-            gateway_start_log_tail(&openclaw_dir)
+            "Gateway 启动超时，请查看 gateway.err.log\n{}\n\n[官方服务启动失败]\n{}",
+            gateway_start_log_tail(&openclaw_dir),
+            official_error
         ))
     }
 
@@ -1993,11 +2117,9 @@ mod platform {
             return Ok(());
         }
 
-        // 先尝试 openclaw gateway stop
-        let _ = crate::utils::openclaw_command_async()
-            .args(["gateway", "stop"])
-            .output()
-            .await;
+        // 优先使用 OpenClaw 官方服务停止命令；服务未安装时 CLI 返回 not-loaded，不视为失败。
+        let _ =
+            official_gateway_json(&["gateway", "stop", "--json"], Duration::from_secs(20)).await;
 
         for _ in 0..10 {
             tokio::time::sleep(Duration::from_millis(300)).await;
