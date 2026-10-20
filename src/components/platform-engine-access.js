@@ -4,7 +4,9 @@ import { onPlatformAccountChange } from '../lib/platform-account.js'
 import { getActiveEngineId, activateEngine } from '../lib/engine-manager.js'
 import { t, onLangChange } from '../lib/i18n.js'
 import { navigate } from '../router.js'
-import { OFFICIAL_ENGINES, engineAccessIdentity, sameEngineAccessIdentity, openConnectedEngine } from '../lib/platform-engine-access.js'
+import { OFFICIAL_ENGINES as ALL_OFFICIAL_ENGINES, engineAccessIdentity, sameEngineAccessIdentity, openConnectedEngine } from '../lib/platform-engine-access.js'
+// OpenClaw 已改为「普通 provider 一键接入」，旧官方通道卡只保留其余引擎，避免出现两个入口。
+const OFFICIAL_ENGINES = ALL_OFFICIAL_ENGINES.filter(engine => engine !== 'openclaw')
 import '../style/platform-engine-access.css'
 
 const names = { openclaw: 'OpenClaw', hermes: 'Hermes Agent', 'deepseek-harness': 'DeepSeek Harness', opencode: 'OpenCode', pi: 'Pi' }

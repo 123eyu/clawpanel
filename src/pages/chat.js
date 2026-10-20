@@ -138,6 +138,11 @@ export async function render() {
   _page = page
   const officialParams = new URLSearchParams(location.hash.split('?')[1] || '')
   _gatewayOfficialRequested = officialParams.get('official') === '1' || officialParams.has('accountOfficial')
+  // 旧版独立官方会话入口已停用：官方模型改为普通 provider 接入，回到普通对话。
+  if (_gatewayOfficialRequested) {
+    history.replaceState(null, '', '#/chat')
+    _gatewayOfficialRequested = false
+  }
   _gatewayOfficialContext = null
   _gatewayOfficialInvalid = _gatewayOfficialRequested
 

@@ -3,7 +3,7 @@
  * 服务商管理 + 模型增删改查 + 主模型选择
  */
 import { api, isTauriRuntime } from '../lib/tauri-api.js'
-import { createGatewayOfficialCard, GATEWAY_OFFICIAL_PROVIDER } from '../lib/openclaw-official-provider.js'
+import { GATEWAY_OFFICIAL_PROVIDER } from '../lib/openclaw-official-provider.js'
 import { toast } from '../components/toast.js'
 import { humanizeError } from '../lib/humanize-error.js'
 import { showModal, showConfirm } from '../components/modal.js'
@@ -20,7 +20,6 @@ import { t } from '../lib/i18n.js'
 import { scheduleGatewayRestart, fireRestartNow, cancelPendingRestart, onRestartState } from '../lib/gateway-restart-queue.js'
 import { termHelpHtml, attachTermTooltips } from '../lib/term-tooltip.js'
 import { syncExplicitModelPolicyAllow } from '../lib/openclaw-model-policy.js'
-let officialGatewayCard = null
 
 // HTML 转义，防止错误信息中的特殊字符破坏页面或被注入
 function escapeHtml(str) {
@@ -60,10 +59,6 @@ export async function render() {
   `
 
   const state = { config: null, search: '', undoStack: [] }
-  if (isTauriRuntime()) {
-    officialGatewayCard = createGatewayOfficialCard()
-    page.querySelector('.config-actions').before(officialGatewayCard.element)
-  }
   // 非阻塞:先返回 DOM,后台加载数据
   loadConfig(page, state)
   bindTopActions(page, state)
@@ -728,8 +723,6 @@ let _saveTimer = null
 let _batchTestAbort = null // 批量测试终止控制器
 
 export function cleanup() {
-  officialGatewayCard?.destroy()
-  officialGatewayCard = null
   clearTimeout(_saveTimer)
   _saveTimer = null
   if (_batchTestAbort) { _batchTestAbort.abort = true; _batchTestAbort = null }

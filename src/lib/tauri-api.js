@@ -386,6 +386,10 @@ export const api = {
   revealModelChannelKey: (channelId) => invoke('reveal_model_channel_key', { channelId }),
 
   // DeepSeek Harness（回环服务；Web 与 Tauri 使用同名后端命令）
+  // 官方模型：作为普通 provider 一键接入引擎配置（凭据仍由本机代理托管）
+  officialProviderStatus: () => invoke('official_provider_status'),
+  officialProviderInstall: (engine) => invoke('official_provider_install', { engine }),
+  officialProviderRemove: (engine) => invoke('official_provider_remove', { engine }),
   officialEngineConnect: (engine, modelId, expected = null) => invoke('official_engine_connect', { engine, modelId, expected }),
   officialEngineAccess: async (action, args = {}) => {
     if (!isTauriRuntime()) throw new Error('desktop_required')

@@ -6,6 +6,7 @@ import { showConfirm } from '../components/modal.js'
 import { showInvitationDialog } from '../components/engagement.js'
 import { renderPlatformOnboarding, renderPlatformOnboardingCompact } from '../lib/platform-onboarding.js'
 import { createPlatformEngineAccessCard } from '../components/platform-engine-access.js'
+import { createOfficialProviderCard } from '../components/official-provider-card.js'
 import { getPlatformAccount, initPlatformAccount, restorePlatformAccount, refreshPlatformAccount, onPlatformAccountChange, platformAccountAction, openPlatformMember, formatCredits, displayPlanName, trialPresentation, platformErrorText, recoverPlatformRequest, getPlatformPublicOffer, loadPlatformPublicOffer, onPlatformPublicOfferChange } from '../lib/platform-account.js'
 import '../style/platform-onboarding.css'
 
@@ -165,6 +166,7 @@ function memberView(state, phase) {
   </section>
   ${bindingView(state)}
   ${renderPlatformOnboardingCompact(state)}
+  <div data-platform-official-provider-slot></div>
   <div data-platform-engine-access-slot></div>
   ${benefitsView(state)}
   <div class="platform-detail-grid"><section class="card" data-platform-registration-benefit><h3>${t('platform.trialTitle')}</h3><h2 data-platform-trial>${escape(trial.label)}</h2>${trial.issued ? `<dl><dt>${t('platform.originalAmount')}</dt><dd><span data-platform-trial-amount>${trial.amount}</span> ${t('platform.credits')}</dd><dt>${t('platform.expires')}</dt><dd>${escape(date(state.trial.expires_at))}</dd></dl>${trial.simulated ? `<span class="platform-tag platform-section">${t('platform.simulated')}</span>` : ''}<p class="form-hint">${t('platform.trialHint')}</p>` : trialPending ? `<p class="form-hint" data-platform-trial-pending>${t('platform.trialNotReceived')}</p>` : ''}<p class="form-hint">${t('platform.benefits.registrationOnce')}</p></section>
@@ -182,6 +184,7 @@ export function render() {
   let error = '', notice = ''
   let focusSelector = '', viewIdentity = ''
   const engineAccess = createPlatformEngineAccessCard()
+  const officialProvider = createOfficialProviderCard()
   function draw() {
     const state = getPlatformAccount()
     const identity = JSON.stringify([state.epoch, state.member?.member_id ?? null])
@@ -210,10 +213,11 @@ export function render() {
       ${state.revocationPending ? `<div class="platform-feedback platform-feedback-warning" role="status">${icon('info', 16)}<p>${t('platform.revocationPending')}</p></div>` : ''}
       ${notice ? `<div class="platform-feedback" role="status">${icon('info', 16)}<p>${escape(notice)}</p></div>` : ''}
       <footer class="platform-account-footer"><p class="platform-scope">${t('platform.scopeHint')}</p>${loading || busy ? `<p class="platform-loading" role="status" data-platform-account-loading>${icon('refresh-cw', 13)}${t(busy ? 'platform.refreshing' : 'platform.checkingAccount')}</p>` : state.member && state.updatedAt ? `<span class="platform-updated">${t('platform.updated')}: ${escape(date(state.updatedAt))}</span>` : ''}</footer>`
+    page.querySelector('[data-platform-official-provider-slot]')?.replaceWith(officialProvider.element)
     page.querySelector('[data-platform-engine-access-slot]')?.replaceWith(engineAccess.element)
     // 取消授权不被后台刷新占用；等待中不并发切号、解绑或刷新账号。
     const waiting = ['authorizing', 'binding', 'reauthorizing'].includes(state.phase)
-    page.querySelectorAll('button').forEach(element => { if (!engineAccess.element.contains(element)) element.disabled = (busy || waiting) && (element.dataset.platformAction !== 'login-cancel' || activeAction === 'login-cancel') })
+    page.querySelectorAll('button').forEach(element => { if (!engineAccess.element.contains(element) && !officialProvider.element.contains(element)) element.disabled = (busy || waiting) && (element.dataset.platformAction !== 'login-cancel' || activeAction === 'login-cancel') })
     expanded.forEach(([attribute, open]) => { const element = page.querySelector(`[${attribute}]`); if (element && open !== undefined) element.open = open })
     const restoreFocus = (focusSelector ? page.querySelector(focusSelector) : null) || (focusSelector === '[data-platform-action="login-cancel"]' ? page.querySelector('[data-platform-action="login"], [data-platform-action="bind"], [data-platform-open-assistant]') : null)
     if (restoreFocus && !restoreFocus.disabled) restoreFocus.focus({ preventScroll: true })
@@ -275,7 +279,7 @@ export function render() {
   })
   const offLang = onLangChange(draw)
   const offPublicOffer = onPlatformPublicOfferChange(() => { if (page.isConnected) draw() })
-  dispose = () => { offState(); offLang(); offPublicOffer(); engineAccess.destroy() }
+  dispose = () => { offState(); offLang(); offPublicOffer(); engineAccess.destroy(); officialProvider.destroy() }
   draw()
   if (isTauriRuntime() && !getPlatformAccount().member) void loadPlatformPublicOffer()
   initPlatformAccount().then(() => refreshPlatformAccount()).catch(failure => { error = platformErrorText(failure) }).finally(() => { loading = false; if (page.isConnected) draw() })

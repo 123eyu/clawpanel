@@ -5903,6 +5903,28 @@
       "gateway": "OpenClaw Gateway settings",
       "gatewayHint": "Set up messaging channels in Gateway. Existing channel bindings stay."
     },
+    "officialProvider": {
+      "title": "Official models",
+      "intro": "One click installs official models as a regular model in the engine, and chats stay in the engine UI.",
+      "desktopOnly": "Install official models in the desktop app.",
+      "bindFirst": "Connect your website account before installing official models.",
+      "loading": "Checking access status…",
+      "refresh": "Refresh",
+      "install": "Install",
+      "refreshAccess": "Refresh access",
+      "remove": "Remove",
+      "installed": "Installed",
+      "notInstalled": "Not installed",
+      "needsReconnect": "Account changed, install again",
+      "installHint": "After installing, choose the official model in that engine.",
+      "modelsHint": "{count} models added. Choose an official model in the engine.",
+      "installedNotice": "Installed. Restart the engine if the model list does not update.",
+      "removedNotice": "Removed and engine config restored.",
+      "restartHint": "Credentials stay in the platform account and are never written into engine configs.",
+      "loadFailed": "Failed to read access status",
+      "installFailed": "Install failed",
+      "removeFailed": "Remove failed"
+    },
     "gatewayOfficial": {
       "title": "OpenClaw official models",
       "signInHint": "Sign in to use official models in new chats and messaging channels.",

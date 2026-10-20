@@ -5903,6 +5903,28 @@
       "gateway": "OpenClaw Gateway 设置",
       "gatewayHint": "消息渠道在 Gateway 中设置，原渠道绑定保留。"
     },
+    "officialProvider": {
+      "title": "官方模型",
+      "intro": "一键接入后，官方模型会作为普通模型出现在引擎的模型列表里，对话使用引擎自己的界面。",
+      "desktopOnly": "请在桌面客户端接入官方模型。",
+      "bindFirst": "先完成官网账户连接，再一键接入官方模型。",
+      "loading": "正在检查接入状态…",
+      "refresh": "刷新",
+      "install": "一键接入",
+      "refreshAccess": "刷新接入",
+      "remove": "断开",
+      "installed": "已接入",
+      "notInstalled": "未接入",
+      "needsReconnect": "账户已变化，请重新接入",
+      "installHint": "接入后到该引擎的模型列表中选择官方模型。",
+      "modelsHint": "已写入 {count} 个模型；在引擎模型列表中选择官方模型。",
+      "installedNotice": "已接入。若模型列表未更新，请重启对应引擎。",
+      "removedNotice": "已断开，引擎配置已恢复。",
+      "restartHint": "官方模型由官网账户托管，凭据不会写入引擎配置；引擎重启后配置仍然有效。",
+      "loadFailed": "读取接入状态失败",
+      "installFailed": "接入失败",
+      "removeFailed": "断开失败"
+    },
     "gatewayOfficial": {
       "title": "OpenClaw 官方模型",
       "signInHint": "登录官网账户，连接后可为新对话和消息渠道选择官方模型。",

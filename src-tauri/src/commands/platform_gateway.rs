@@ -28,6 +28,73 @@ impl Drop for Lease {
     }
 }
 
+const PROXY_STATE: &str = "official-gateway.json";
+
+fn proxy_state_path() -> std::path::PathBuf {
+    super::super::openclaw_dir()
+        .join("clawpanel")
+        .join(PROXY_STATE)
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ProxyState {
+    port: Option<u16>,
+    #[serde(default)]
+    leases: Vec<LeaseState>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LeaseState {
+    cap: String,
+    engine: String,
+    member: String,
+    epoch: u64,
+}
+
+fn load_proxy_state() -> ProxyState {
+    std::fs::read(proxy_state_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// 端口与能力令牌落盘：客户端重启后引擎配置里的 provider baseUrl 仍然有效。
+fn save_proxy_state(gateway: &Gateway) {
+    let Some(port) = gateway.port else { return };
+    let state = ProxyState {
+        port: Some(port),
+        leases: gateway
+            .leases
+            .iter()
+            .map(|lease| LeaseState {
+                cap: lease.cap.clone(),
+                engine: lease.engine.clone(),
+                member: lease.member.clone(),
+                epoch: lease.epoch,
+            })
+            .collect(),
+    };
+    let Ok(bytes) = serde_json::to_vec_pretty(&state) else {
+        return;
+    };
+    let path = proxy_state_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, bytes);
+}
+
+/// 启动时若已有接入记录，则按持久化端口恢复本机代理监听。
+pub async fn ensure_proxy() {
+    if !proxy_state_path().exists() {
+        return;
+    }
+    let Ok(platform) = PLATFORM.as_ref() else {
+        return;
+    };
+    let _ = platform.clone().ensure_gateway_listener().await;
+}
+
 /// 只供本机native adapter；不能直接作为WebView IPC返回或普通渠道导出。
 pub async fn engine_connection(engine: &str) -> Result<Value, String> {
     PLATFORM
@@ -158,6 +225,68 @@ impl Platform {
         )
     }
 
+    /// 确保本机官方代理监听：优先复用持久化端口，并把持久化的能力令牌恢复为租约。
+    pub(super) async fn ensure_gateway_listener(self: &Arc<Self>) -> Result<u16, String> {
+        let mut gateway = self.gateway.lock().await;
+        if let Some(port) = gateway.port {
+            return Ok(port);
+        }
+        let saved = load_proxy_state();
+        let mut bound = None;
+        if let Some(saved_port) = saved.port {
+            if let Ok(listener) =
+                TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, saved_port)).await
+            {
+                bound = Some(listener);
+            }
+        }
+        let listener = match bound {
+            Some(listener) => listener,
+            None => TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .map_err(|_| "official_gateway_unavailable")?,
+        };
+        let port = listener
+            .local_addr()
+            .map_err(|_| "official_gateway_unavailable")?
+            .port();
+        gateway.port = Some(port);
+        gateway.leases = saved
+            .leases
+            .into_iter()
+            .map(|lease| Lease {
+                cap: lease.cap,
+                engine: lease.engine,
+                member: lease.member,
+                epoch: lease.epoch,
+            })
+            .collect();
+        let weak = Arc::downgrade(self);
+        let permits = Arc::new(Semaphore::new(32));
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let Ok((socket, peer)) = listener.accept().await else {
+                    break;
+                };
+                if !peer.ip().is_loopback() {
+                    continue;
+                }
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    continue;
+                };
+                let Some(platform) = weak.upgrade() else {
+                    break;
+                };
+                tauri::async_runtime::spawn(async move {
+                    let _permit = permit;
+                    let _ = platform.gateway_request(socket, port).await;
+                });
+            }
+        });
+        save_proxy_state(&gateway);
+        Ok(port)
+    }
+
     pub(super) async fn engine_connection(self: &Arc<Self>, engine: &str) -> Result<Value, String> {
         if !ENGINES.contains(&engine) {
             return Err("unsupported_official_engine".into());
@@ -179,39 +308,8 @@ impl Platform {
         };
         let catalog = self.models_for(engine, None).await?;
         self.current(epoch).await?;
+        let port = self.ensure_gateway_listener().await?;
         let mut gateway = self.gateway.lock().await;
-        if gateway.port.is_none() {
-            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-                .await
-                .map_err(|_| "official_gateway_unavailable")?;
-            let port = listener
-                .local_addr()
-                .map_err(|_| "official_gateway_unavailable")?
-                .port();
-            gateway.port = Some(port);
-            let weak = Arc::downgrade(self);
-            let permits = Arc::new(Semaphore::new(32));
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    let Ok((socket, peer)) = listener.accept().await else {
-                        break;
-                    };
-                    if !peer.ip().is_loopback() {
-                        continue;
-                    }
-                    let Ok(permit) = permits.clone().try_acquire_owned() else {
-                        continue;
-                    };
-                    let Some(platform) = weak.upgrade() else {
-                        break;
-                    };
-                    tauri::async_runtime::spawn(async move {
-                        let _permit = permit;
-                        let _ = platform.gateway_request(socket, port).await;
-                    });
-                }
-            });
-        }
         gateway
             .leases
             .retain(|lease| lease.epoch == epoch && lease.member == member);
@@ -223,13 +321,14 @@ impl Platform {
                 epoch,
             });
         }
+        save_proxy_state(&gateway);
         let lease = gateway
             .leases
             .iter()
             .find(|lease| lease.engine == engine)
             .unwrap();
         Ok(
-            json!({"engine":engine,"providerId":"clawpanel-official","baseUrl":format!("http://127.0.0.1:{}/engine/{}/v1",gateway.port.unwrap(),lease.cap),"apiKey":"clawpanel-local","models":catalog["data"],"memberId":member,"epoch":epoch}),
+            json!({"engine":engine,"providerId":"clawpanel-official","baseUrl":format!("http://127.0.0.1:{}/engine/{}/v1",port,lease.cap),"apiKey":"clawpanel-local","models":catalog["data"],"memberId":member,"epoch":epoch}),
         )
     }
 
@@ -308,18 +407,20 @@ impl Platform {
         {
             return error(&mut socket, 400, "invalid_official_request").await;
         }
-        let Some(id) = request
-            .headers
-            .get("x-clawpanel-operation-id")
-            .filter(|id| {
-                (16..=128).contains(&id.len())
-                    && id
+        // 普通 provider 不携带私有头：缺失时由本机代理生成操作 ID，显式提供则仍做校验。
+        let id = match request.headers.get("x-clawpanel-operation-id") {
+            Some(raw) => {
+                let candidate = String::from_utf8_lossy(raw.as_bytes());
+                if !(16..=128).contains(&candidate.len())
+                    || !candidate
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-            })
-            .cloned()
-        else {
-            return error(&mut socket, 400, "official_operation_id_required").await;
+                {
+                    return error(&mut socket, 400, "official_operation_id_invalid").await;
+                }
+                candidate.into_owned()
+            }
+            None => identity::random_id(),
         };
         let mut body: Value = match serde_json::from_slice(&request.body) {
             Ok(value) => value,

@@ -6,8 +6,8 @@ mod utils;
 use commands::{
     agent, assistant, cli_conflict, config, deepseek_harness, device, diagnose, engine_official,
     extensions, hermes, hermes_providers, logs, media, memory, messaging, model_channels,
-    openclaw_gateway_official, opencode, pairing, pi, platform, portable, service, site_api,
-    skills, update,
+    official_provider, openclaw_gateway_official, opencode, pairing, pi, platform, portable,
+    service, site_api, skills, update,
 };
 
 pub fn run() {
@@ -78,6 +78,10 @@ pub fn run() {
                 site_api::start_heartbeat_loop();
             }
             tray::setup_tray(app.handle())?;
+            // 已有官方模型接入时，按持久化端口恢复本机代理；失败不影响启动。
+            tauri::async_runtime::spawn(async {
+                commands::platform::ensure_official_proxy().await;
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -215,6 +219,9 @@ pub fn run() {
             pi::pi_call,
             engine_official::official_engine_connect,
             engine_official::official_engine_access,
+            official_provider::official_provider_status,
+            official_provider::official_provider_install,
+            official_provider::official_provider_remove,
             openclaw_gateway_official::openclaw_gateway_official,
             engine_official::official_engine_run,
             engine_official::official_engine_status,
