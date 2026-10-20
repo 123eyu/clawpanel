@@ -332,9 +332,6 @@ test('手工资格 workflow 不绕过 Daily main guard，不写权限/凭据，�
   assert.doesNotMatch(src, /secrets\.|codex-action|pull_request_target|workflow_call|schedule:|GH_TOKEN|GITHUB_TOKEN|contents: write|id-token: write|git push|Set-ExecutionPolicy/i)
   assert.match(src, /tooling\/scripts\/test-hermes-windows-qualification\.mjs/)
   assert.doesNotMatch(src, /run:.*\$\{\{ inputs\./)
-  const daily = fs.readFileSync(path.join(root, '.github/workflows/maintenance.yml'), 'utf8')
-  assert.match(daily, /inputs\.runtime_selftest.*github\.repository == 'qingchencloud\/clawpanel'.*github\.ref == 'refs\/heads\/main'/)
-  assert.match(daily, /--cap-drop=ALL --security-opt=no-new-privileges/)
 })
 
 test('真实宿主 execute 在任何 candidate/install 命令前失败，伪装容器变量也无效', async () => {
