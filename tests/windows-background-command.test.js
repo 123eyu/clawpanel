@@ -80,7 +80,7 @@ test('Windows实际自有Rust子进程+普通Gateway runner：无控制台/Unico
   const evidence = process.env.WINDOWS_BACKGROUND_EVIDENCE ? path.resolve(process.env.WINDOWS_BACKGROUND_EVIDENCE) : fs.realpathSync.native(os.tmpdir())
   fs.mkdirSync(evidence, { recursive: true })
   const owned = fs.mkdtempSync(path.join(evidence, 'owned 控制台 空格 & fixture-'))
-  const source = `use std::{fs,env};\nuse std::path::{Path,PathBuf};\nuse std::process::{Command as StdCommand,Stdio};\nuse std::os::windows::process::CommandExt;\nmod utils { use std::os::windows::process::CommandExt; ${extract(utils, 'background_command')} }\n${pieces}\n` + String.raw`
+  const source = `use std::{fs,env};\nuse std::path::{Path,PathBuf};\nuse std::process::{Command as StdCommand,Stdio};\nuse std::os::windows::process::CommandExt;\nmod utils { use std::os::windows::process::CommandExt; ${extract(utils, 'background_command')} pub fn decode_text(bytes: &[u8]) -> String { String::from_utf8_lossy(bytes).into_owned() } }\n${pieces}\n` + String.raw`
 #[link(name="kernel32")] extern "system" { fn GetConsoleWindow() -> *mut std::ffi::c_void; }
 fn main() {
  let args:Vec<String>=env::args().collect();
@@ -101,11 +101,13 @@ fn main() {
  for (kind,cli) in variants { for code in [0,7] {
   let home=root.join(format!("home 中文 {} {}",kind,code));fs::create_dir_all(home.join("logs")).unwrap();
   let runner=write_gateway_terminal_runner(&home,&cli).unwrap();
+  assert!(!fs::read_to_string(&runner).unwrap().contains("1>>"));
   assert!(fs::read(&runner).unwrap().is_ascii());
   let mut cmd=gateway_runner_command(&runner,&cli);
   cmd.env("PATH",format!("{};{}",root.display(),env::var("PATH").unwrap()));
-  let outer=fs::OpenOptions::new().create(true).append(true).open(home.join("outer.log")).unwrap();
-  let result=cmd.env("FIXTURE_UNICODE","后台中文🙂").env("FIXTURE_EXIT",code.to_string()).current_dir(&home).stdin(Stdio::null()).stdout(Stdio::from(outer.try_clone().unwrap())).stderr(Stdio::from(outer)).status().unwrap();
+  let log_out=fs::OpenOptions::new().create(true).append(true).open(home.join("logs/gateway.log")).unwrap();
+  let log_err=fs::OpenOptions::new().create(true).append(true).open(home.join("logs/gateway.err.log")).unwrap();
+  let result=cmd.env("FIXTURE_UNICODE","后台中文🙂").env("FIXTURE_EXIT",code.to_string()).current_dir(&home).stdin(Stdio::null()).stdout(Stdio::from(log_out)).stderr(Stdio::from(log_err)).status().unwrap();
   assert_eq!(result.code(),Some(code));codes.push(code);
   let log=fs::read_to_string(home.join("logs/gateway.log")).unwrap();let err=fs::read_to_string(home.join("logs/gateway.err.log")).unwrap();
   assert!(log.contains("\"console_window\":0"),"{}",log);assert!(log.contains("\"env_ok\":true"));assert!(log.contains("\"arg_ok\":true"));assert!(err.contains("owned-stderr-中文"));
