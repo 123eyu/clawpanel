@@ -4,7 +4,7 @@ import { t, getLang, onLangChange } from '../lib/i18n.js'
 import { icon } from '../lib/icons.js'
 import { showConfirm } from '../components/modal.js'
 import { showInvitationDialog } from '../components/engagement.js'
-import { renderPlatformOnboarding } from '../lib/platform-onboarding.js'
+import { renderPlatformOnboarding, renderPlatformOnboardingCompact } from '../lib/platform-onboarding.js'
 import { createPlatformEngineAccessCard } from '../components/platform-engine-access.js'
 import { getPlatformAccount, initPlatformAccount, restorePlatformAccount, refreshPlatformAccount, onPlatformAccountChange, platformAccountAction, openPlatformMember, formatCredits, displayPlanName, trialPresentation, platformErrorText, recoverPlatformRequest, getPlatformPublicOffer, loadPlatformPublicOffer, onPlatformPublicOfferChange } from '../lib/platform-account.js'
 import '../style/platform-onboarding.css'
@@ -12,6 +12,14 @@ import '../style/platform-onboarding.css'
 let dispose = null
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(getLang()) : '—'
+// 账户页积分按千分位展示，最多保留两位小数；其余明细仍用原始精度。
+const pointsText = value => {
+  const formatted = formatCredits(value)
+  if (formatted === '—') return formatted
+  const amount = Number(formatted)
+  if (!Number.isFinite(amount)) return formatted
+  return new Intl.NumberFormat(getLang(), { maximumFractionDigits: 2 }).format(amount)
+}
 const button = (action, key, primary = false, extra = '') => `<button type="button" class="btn btn-${primary ? 'primary' : 'secondary'} btn-sm" data-platform-action="${action}" ${extra}>${escape(t(`platform.${key}`))}</button>`
 const textButton = (action, key) => `<button type="button" class="platform-text-button" data-platform-action="${action}">${escape(t(`platform.${key}`))}</button>`
 const assistantLink = (primary = true, guest = false) => `<a class="btn btn-${primary ? 'primary' : 'secondary'}" href="#/assistant" data-platform-open-assistant ${guest ? 'data-platform-guest-primary' : ''}>${icon('message-square', 16)}${t('platform.openAssistant')}</a>`
@@ -141,14 +149,22 @@ function memberView(state, phase) {
   const waiting = ['authorizing', 'binding', 'reauthorizing'].includes(state.phase)
   const mainAction = needsLogin ? button('login', 'login', true) : state.phase === 'logged_in' ? button('bind', 'bind', true) : assistantLink(!waiting)
   const trialPending = ['pending_delivery', 'pending_budget', 'pending_review', 'configuration_unavailable'].includes(trial.status)
-  return `<section class="card platform-identity" data-platform-member ${state.phase === 'bound' ? 'data-platform-bound' : ''}>
-    <div class="platform-identity-row"><div><div class="platform-eyebrow">${t('platform.account')}</div><h2>${escape(member.email_masked)}</h2></div><span class="platform-state" data-platform-account-status data-state="${escape(state.phase)}"><span class="platform-state-dot" aria-hidden="true"></span>${escape(phase)}</span></div>
-    <div class="platform-summary"><div class="platform-balance"><div class="platform-eyebrow">${t('platform.available')}</div><div class="platform-credit" data-platform-balance>${formatCredits(wallet?.summary?.available_micro_cny)} <span>${t('platform.credits')}</span></div><p>${t('platform.reserved')}: ${formatCredits(wallet?.summary?.reserved_micro_cny)} ${t('platform.credits')}</p>${wallet?.simulated ? `<span class="platform-tag">${t('platform.simulated')}</span>` : ''}<p class="form-hint">${t('platform.creditUnit')}</p></div>
-    <div class="platform-entitlements"><div class="platform-eyebrow">${t('platform.group')}</div><h2 data-platform-plan>${escape(displayPlanName(member))}</h2><p>${escape(serviceLabel)}</p></div></div>
-    <div class="platform-actions">${mainAction}${state.phase === 'logged_in' || needsLogin ? assistantLink(false) : ''}${waiting ? button('login-cancel', 'cancel') : ''}${button('refresh', 'refresh')}${button('invite', 'invite')}</div>
+  const avatar = String(member.email_masked || '?').trim().charAt(0).toUpperCase()
+  const reserved = formatCredits(wallet?.summary?.reserved_micro_cny)
+  return `<section class="card platform-member" data-platform-member ${state.phase === 'bound' ? 'data-platform-bound' : ''}>
+    <div class="platform-member-head">
+      <span class="platform-avatar" aria-hidden="true">${escape(avatar)}</span>
+      <div class="platform-member-meta"><h2>${escape(member.email_masked)}</h2><div class="platform-pills"><span class="platform-pill platform-pill-ok" data-platform-account-status data-state="${escape(state.phase)}"><span class="platform-pill-dot" aria-hidden="true"></span>${escape(phase)}</span>${wallet?.simulated ? `<span class="platform-pill">${t('platform.simulated')}</span>` : ''}</div></div>
+      <div class="platform-member-actions">${mainAction}${state.phase === 'logged_in' || needsLogin ? assistantLink(false) : ''}${waiting ? button('login-cancel', 'cancel') : ''}${button('refresh', 'refresh')}${button('invite', 'invite')}</div>
+    </div>
+    <div class="platform-metrics">
+      <div class="platform-metric"><span class="platform-metric-label">${t('platform.available')}</span><strong class="platform-metric-value" data-platform-balance>${pointsText(wallet?.summary?.available_micro_cny)}<small>${t('platform.credits')}</small></strong><span class="platform-metric-sub">${t('platform.creditUnit')}</span></div>
+      <div class="platform-metric"><span class="platform-metric-label">${t('platform.reserved')}</span><strong class="platform-metric-value">${reserved}<small>${t('platform.credits')}</small></strong></div>
+      <div class="platform-metric"><span class="platform-metric-label">${t('platform.group')}</span><strong class="platform-metric-value platform-metric-plan" data-platform-plan>${escape(displayPlanName(member))}</strong><span class="platform-metric-sub">${escape(serviceLabel)}</span></div>
+    </div>
   </section>
   ${bindingView(state)}
-  ${renderPlatformOnboarding(state, null)}
+  ${renderPlatformOnboardingCompact(state)}
   <div data-platform-engine-access-slot></div>
   ${benefitsView(state)}
   <div class="platform-detail-grid"><section class="card" data-platform-registration-benefit><h3>${t('platform.trialTitle')}</h3><h2 data-platform-trial>${escape(trial.label)}</h2>${trial.issued ? `<dl><dt>${t('platform.originalAmount')}</dt><dd><span data-platform-trial-amount>${trial.amount}</span> ${t('platform.credits')}</dd><dt>${t('platform.expires')}</dt><dd>${escape(date(state.trial.expires_at))}</dd></dl>${trial.simulated ? `<span class="platform-tag platform-section">${t('platform.simulated')}</span>` : ''}<p class="form-hint">${t('platform.trialHint')}</p>` : trialPending ? `<p class="form-hint" data-platform-trial-pending>${t('platform.trialNotReceived')}</p>` : ''}<p class="form-hint">${t('platform.benefits.registrationOnce')}</p></section>

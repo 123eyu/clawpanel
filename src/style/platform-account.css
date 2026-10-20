@@ -146,3 +146,38 @@
   .platform-credit { font-size:36px; }
   .ast-platform-controls { padding:8px 12px; }
 }
+
+/* 会员视图：账户头部与指标行（与官网一致的紧凑排版） */
+.platform-member { padding:22px 24px; }
+.platform-member-head { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+.platform-avatar { width:42px; height:42px; flex-shrink:0; display:grid; place-items:center; border-radius:50%; background:var(--accent-muted); color:var(--accent); font-size:16px; font-weight:600; }
+.platform-member-meta { flex:1; min-width:180px; display:grid; gap:6px; min-width:0; }
+.platform-member-meta h2 { margin:0; font-size:17px; font-weight:600; line-height:1.35; overflow-wrap:anywhere; }
+.platform-pills { display:flex; flex-wrap:wrap; gap:6px; }
+.platform-pill { display:inline-flex; align-items:center; gap:6px; padding:2px 9px; border:1px solid var(--border-primary); border-radius:999px; color:var(--text-secondary); font-size:11px; line-height:1.75; }
+.platform-pill-ok { color:var(--success,#16a34a); border-color:color-mix(in srgb,var(--success,#16a34a) 32%,var(--border-primary)); background:color-mix(in srgb,var(--success,#16a34a) 8%,transparent); }
+.platform-pill-dot { width:6px; height:6px; flex-shrink:0; border-radius:50%; background:currentColor; }
+.platform-member-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.platform-member-actions .btn { min-height:32px; }
+.platform-metrics { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(0,1fr) minmax(0,1fr); margin-top:20px; padding-top:18px; border-top:1px solid var(--border-primary); }
+.platform-metric { display:grid; gap:4px; min-width:0; padding:0 24px; border-left:1px solid var(--border-primary); }
+.platform-metric:first-child { padding-left:0; border-left:0; }
+.platform-metric-label { color:var(--text-secondary); font-size:12px; }
+.platform-metric-value { font-size:28px; font-weight:600; line-height:1.15; letter-spacing:-.6px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.platform-metric-value small { margin-left:5px; font-size:12px; font-weight:400; letter-spacing:0; color:var(--text-secondary); }
+.platform-metric-plan { font-size:18px; letter-spacing:-.2px; }
+.platform-metric-sub { color:var(--text-tertiary); font-size:11px; line-height:1.5; }
+.platform-note { padding:0 20px; }
+.platform-note > summary { display:flex; align-items:center; gap:8px; padding:13px 0; color:var(--text-secondary); font-size:12px; line-height:1.6; cursor:pointer; list-style:none; }
+.platform-note > summary::-webkit-details-marker { display:none; }
+.platform-note > summary::before { content:'▸'; color:var(--text-tertiary); transition:transform .15s; }
+.platform-note[open] > summary::before { transform:rotate(90deg); }
+.platform-note-body { padding:0 0 14px; color:var(--text-secondary); font-size:12px; line-height:1.7; }
+.platform-note-body p { margin:0 0 4px; }
+.platform-note-body p:last-child { margin-bottom:0; }
+@media(max-width:760px) {
+  .platform-member { padding:18px; }
+  .platform-member-actions { width:100%; }
+  .platform-metrics { grid-template-columns:1fr; gap:14px; }
+  .platform-metric { padding:0; border-left:0; }
+}

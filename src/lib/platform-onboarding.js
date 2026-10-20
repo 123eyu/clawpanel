@@ -17,6 +17,13 @@ function registrationStatus(trial) {
   return text('registrationUnknown')
 }
 
+/** 已连接后的说明默认折叠，避免长文案铺满账户页。 */
+export function renderPlatformOnboardingCompact(state) {
+  const next = state.phase === 'logged_in' ? 'connectNext' : state.phase === 'bound' ? 'assistantNext'
+    : ['binding', 'reauthorizing', 'authorizing'].includes(state.phase) ? 'authorizationNext' : 'signInAgain'
+  return `<details class="card platform-note platform-section" data-platform-onboarding="member"><summary>${text('nextTitle')}</summary><div class="platform-note-body"><p data-platform-onboarding-next>${text(next)}</p><p data-platform-registration-guidance>${registrationStatus(state.trial)}</p><p class="form-hint" data-platform-installation-guidance>${text('oneConnection')} ${text('assistantScope')}</p></div></details>`
+}
+
 export function renderPlatformOnboarding(state, publicOffer) {
   if (state.member) {
     const next = state.phase === 'logged_in' ? 'connectNext' : state.phase === 'bound' ? 'assistantNext'
