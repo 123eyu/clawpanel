@@ -546,6 +546,32 @@ pub fn openclaw_command_async() -> tokio::process::Command {
     }
 }
 
+/// Windows 子进程输出与日志可能是 GBK 或 UTF-16 编码；按 UTF-8 → UTF-16LE → GBK 的顺序解码，
+/// 避免把系统 OEM 编码的中文日志显示成乱码。
+pub fn decode_text(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let (text, _, _) = encoding_rs::UTF_16LE.decode(&bytes[2..]);
+        return text.into_owned();
+    }
+    // 无 BOM 的 UTF-16LE：每个 ASCII 字符后紧跟 NUL，按奇数字节 NUL 密度判断。
+    if bytes.len() >= 4
+        && bytes.len() % 2 == 0
+        && bytes.iter().skip(1).step_by(2).filter(|b| **b == 0).count() * 4 > bytes.len()
+    {
+        let (text, _, _) = encoding_rs::UTF_16LE.decode(bytes);
+        return text.into_owned();
+    }
+    let (text, _, _) = encoding_rs::GBK.decode(bytes);
+    text.into_owned()
+}
+
 #[cfg(all(test, target_os = "windows"))]
 mod windows_background_tests {
     use super::*;

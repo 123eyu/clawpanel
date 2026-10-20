@@ -96,6 +96,21 @@ export function probeTcpPort(port, host = '127.0.0.1', timeoutMs = 3000) {
 }
 
 /** 从指定偏移读取文件末尾，限制返回大小，供启动失败日志增量诊断复用。 */
+// Windows 子进程日志可能来自 GBK 或 UTF-16；优先 UTF-8，失败再按 BOM/GBK 解码。
+function decodeTextBytes(buffer) {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+  } catch {}
+  try {
+    if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+      return new TextDecoder('utf-16le').decode(buffer.subarray(2))
+    }
+    return new TextDecoder('gbk').decode(buffer)
+  } catch {
+    return buffer.toString('utf8')
+  }
+}
+
 export function readFileExcerptSince(filePath, offset = 0, maxBytes = 8192) {
   try {
     const size = fs.statSync(filePath).size
@@ -109,7 +124,7 @@ export function readFileExcerptSince(filePath, offset = 0, maxBytes = 8192) {
     try {
       const buffer = Buffer.alloc(length)
       const bytesRead = fs.readSync(fd, buffer, 0, length, start)
-      return buffer.subarray(0, bytesRead).toString('utf8').trim()
+      return decodeTextBytes(buffer.subarray(0, bytesRead)).trim()
     } finally {
       fs.closeSync(fd)
     }

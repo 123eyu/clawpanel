@@ -370,7 +370,7 @@ fn read_file_excerpt_since(path: &std::path::Path, offset: u64, max_bytes: usize
     if file.read_to_end(&mut bytes).is_err() {
         return String::new();
     }
-    String::from_utf8_lossy(&bytes).trim().to_string()
+    crate::utils::decode_text(&bytes).trim().to_string()
 }
 
 fn read_gateway_error_log_excerpt_since(offset: u64, max_bytes: usize) -> String {
@@ -1833,11 +1833,10 @@ mod platform {
         fs::create_dir_all(openclaw_dir).map_err(|e| format!("创建 OpenClaw 目录失败: {e}"))?;
         let runner_path = openclaw_dir.join("clawpanel-gateway.cmd");
         // %~dp0/%~1由cmd按Unicode展开；脚本本身只含ASCII，空间/中文路径不依赖系统代码页。
-        let stdout_log = quote_batch_path(r"%~dp0logs\gateway.log");
-        let stderr_log = quote_batch_path(r"%~dp0logs\gateway.err.log");
+        // stdout/stderr 已由父进程用日志文件句柄接管；脚本内不能再 1>>/2>> 同一文件，否则 Windows 共享冲突。
         let content = format!(
-            "@echo off\r\necho Starting OpenClaw Gateway. Logs are available in ClawPanel.\r\n{} 1>>{} 2>>{}\r\nset \"CLAWPANEL_EXIT_CODE=%errorlevel%\"\r\nif not \"%CLAWPANEL_EXIT_CODE%\"==\"0\" (\r\n  >>{} echo [ClawPanel] Gateway exited with code %CLAWPANEL_EXIT_CODE%\r\n  echo Gateway failed with exit code %CLAWPANEL_EXIT_CODE%. Open ClawPanel diagnostics for details.\r\n)\r\nexit /b %CLAWPANEL_EXIT_CODE%\r\n",
-            gateway_terminal_command(cli), stdout_log, stderr_log, stderr_log,
+            "@echo off\r\necho Starting OpenClaw Gateway. Logs are available in ClawPanel.\r\n{}\r\nset \"CLAWPANEL_EXIT_CODE=%errorlevel%\"\r\nif not \"%CLAWPANEL_EXIT_CODE%\"==\"0\" (\r\n  echo [ClawPanel] Gateway exited with code %CLAWPANEL_EXIT_CODE% 1>&2\r\n  echo Gateway failed with exit code %CLAWPANEL_EXIT_CODE%. Open ClawPanel diagnostics for details.\r\n)\r\nexit /b %CLAWPANEL_EXIT_CODE%\r\n",
+            gateway_terminal_command(cli),
         );
         fs::write(&runner_path, content).map_err(|e| format!("写入 Gateway 启动脚本失败: {e}"))?;
         Ok(runner_path)
@@ -1869,7 +1868,7 @@ mod platform {
             Ok(bytes) => bytes,
             Err(error) => return format!("读取 gateway.err.log 尾部失败: {error}"),
         };
-        let text = String::from_utf8_lossy(&bytes);
+        let text = crate::utils::decode_text(&bytes);
         let lines = text
             .lines()
             .rev()

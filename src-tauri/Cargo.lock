@@ -550,12 +550,13 @@ dependencies = [
 
 [[package]]
 name = "clawpanel"
-version = "0.22.6"
+version = "0.22.7"
 dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs 6.0.0",
  "ed25519-dalek",
+ "encoding_rs",
  "flate2",
  "futures-util",
  "keyring",
