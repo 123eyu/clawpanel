@@ -365,6 +365,7 @@ export default {
   byokChannelGuide: _('使用你自己的 API Key，由所选服务商计费。', 'Use your own API key, billed by your selected provider.'),
   byokSettingsAction: _('配置自有 Key', 'Configure own key'),
   officialChannelGuide: _('通过官网账户使用官方模型，按可用积分抵扣。', 'Use official models through your website account and available credits.'),
+  officialBillingDetails: _('计费与权益说明', 'Pricing & quota', '計費與權益說明'),
   officialAccountAction: _('登录并连接账户', 'Sign in and connect'),
   officialToolsNewSessionToast: _('已新建工具会话，原对话保留', 'Started a new tool conversation. Your previous conversation is kept.', '已建立工具對話，原對話保留'),
   officialHistoryStorageFullToast: _('空间不足，本次对话暂未保存。请勿关闭窗口；原对话已保留。', 'Storage is full. This conversation is not saved yet. Keep this window open; existing conversations are kept.', '空間不足，本次對話尚未儲存。請勿關閉視窗；原對話已保留。'),

@@ -3201,6 +3201,7 @@
     "byokChannelGuide": "Use your own API key, billed by your selected provider.",
     "byokSettingsAction": "Configure own key",
     "officialChannelGuide": "Use official models through your website account and available credits.",
+    "officialBillingDetails": "Pricing & quota",
     "officialAccountAction": "Sign in and connect",
     "officialToolsNewSessionToast": "Started a new tool conversation. Your previous conversation is kept.",
     "officialHistoryStorageFullToast": "Storage is full. This conversation is not saved yet. Keep this window open; existing conversations are kept.",

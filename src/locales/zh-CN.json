@@ -3201,6 +3201,7 @@
     "byokChannelGuide": "使用你自己的 API Key，由所选服务商计费。",
     "byokSettingsAction": "配置自有 Key",
     "officialChannelGuide": "通过官网账户使用官方模型，按可用积分抵扣。",
+    "officialBillingDetails": "计费与权益说明",
     "officialAccountAction": "登录并连接账户",
     "officialToolsNewSessionToast": "已新建工具会话，原对话保留",
     "officialHistoryStorageFullToast": "空间不足，本次对话暂未保存。请勿关闭窗口；原对话已保留。",
